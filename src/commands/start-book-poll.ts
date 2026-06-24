@@ -1,21 +1,28 @@
 import { ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
 import { randomUUID } from "node:crypto";
-import { getBookClubCollections, PollDocument } from "../book-club.js";
-import { buildPollComponents, buildPollEmbed } from "../polls.js";
+import { getBookClubCollections, PollDocument, PollType } from "../book-club.js";
+import { buildPollComponents, buildPollEmbed, getMaxPollOptions } from "../polls.js";
 
 export const data = new SlashCommandBuilder()
   .setName("start-book-poll")
   .setDescription("Start a poll using the current book nominations.")
+  .addStringOption((option) =>
+    option
+      .setName("type")
+      .setDescription("Choose how votes are counted.")
+      .addChoices({ name: "Regular", value: "regular" }, { name: "Ranked", value: "ranked" }),
+  )
   .addIntegerOption((option) =>
     option
       .setName("limit")
-      .setDescription("How many nominations to include, from 2 to 10.")
+      .setDescription("How many nominations to include, from 2 to 25.")
       .setMinValue(2)
-      .setMaxValue(10),
+      .setMaxValue(25),
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {
-  const limit = interaction.options.getInteger("limit") ?? 10;
+  const pollType = (interaction.options.getString("type") ?? "regular") as PollType;
+  const limit = Math.min(interaction.options.getInteger("limit") ?? 10, getMaxPollOptions());
   const { nominations, polls } = getBookClubCollections();
 
   const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
@@ -27,15 +34,16 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return;
   }
 
+  const minimumNominations = pollType === "ranked" ? 3 : 2;
   const nominationDocs = await nominations
     .find({ guildId: interaction.guildId, status: "nominated" })
     .sort({ createdAt: 1 })
     .limit(limit)
     .toArray();
 
-  if (nominationDocs.length < 2) {
+  if (nominationDocs.length < minimumNominations) {
     await interaction.reply({
-      content: "Nominate at least two books before starting a poll.",
+      content: `Nominate at least ${minimumNominations} books before starting a ${pollType} poll.`,
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -49,6 +57,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     channelId: interaction.channelId,
     messageId: null,
     status: "active",
+    pollType,
     options: nominationDocs.map((nomination) => ({
       nominationId: nomination.nominationId,
       title: nomination.title,

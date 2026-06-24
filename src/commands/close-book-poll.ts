@@ -22,6 +22,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 
   const { highestVoteCount, winners } = getWinningOptions(poll);
+  const scoreLabel = poll.pollType === "ranked" ? "point" : "vote";
   const now = new Date();
 
   if (winners.length === 0) {
@@ -99,7 +100,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 
   await interaction.reply({
-    content: `Closed the poll. The winner had ${highestVoteCount} vote${highestVoteCount === 1 ? "" : "s"}.`,
+    content: `Closed the poll. The winner had ${highestVoteCount} ${scoreLabel}${highestVoteCount === 1 ? "" : "s"}.`,
     embeds: [
       buildBookAddedEmbed({
         action: "Poll winner added to the club book list",

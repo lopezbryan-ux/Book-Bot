@@ -1,6 +1,15 @@
 import { ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
 import { randomUUID } from "node:crypto";
-import { formatBookTitle, getBookClubCollections, getImageUrlOrNull, normalizeTitle } from "../book-club.js";
+import {
+  NominationDocument,
+  PollDocument,
+  PollOption,
+  formatBookTitle,
+  getBookClubCollections,
+  getImageUrlOrNull,
+  normalizeTitle,
+} from "../book-club.js";
+import { buildPollComponents, buildPollEmbed, getMaxPollOptions } from "../polls.js";
 
 export const data = new SlashCommandBuilder()
   .setName("nominate-book")
@@ -15,6 +24,35 @@ export const data = new SlashCommandBuilder()
   .addStringOption((option) =>
     option.setName("image-url").setDescription("Optional book cover image URL.").setMaxLength(1000),
   );
+
+function buildPollOption(nomination: NominationDocument): PollOption {
+  return {
+    nominationId: nomination.nominationId,
+    title: nomination.title,
+    normalizedTitle: nomination.normalizedTitle,
+    author: nomination.author,
+    nominatedBy: nomination.nominatedBy,
+    reason: nomination.reason,
+    imageUrl: nomination.imageUrl,
+  };
+}
+
+async function refreshPollMessage(interaction: ChatInputCommandInteraction, poll: PollDocument) {
+  if (!poll.messageId) return;
+
+  const channel =
+    poll.channelId === interaction.channelId
+      ? interaction.channel
+      : await interaction.client.channels.fetch(poll.channelId).catch(() => null);
+
+  if (!channel?.isTextBased()) return;
+
+  const pollMessage = await channel.messages.fetch(poll.messageId).catch(() => null);
+  await pollMessage?.edit({
+    embeds: [buildPollEmbed(poll)],
+    components: buildPollComponents(poll),
+  });
+}
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   const title = interaction.options.getString("title", true).trim();
@@ -36,7 +74,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  const { nominations } = getBookClubCollections();
+  const { nominations, polls } = getBookClubCollections();
   const now = new Date();
   const normalizedTitle = normalizeTitle(title);
 
@@ -69,7 +107,54 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     { upsert: true },
   );
 
+  const nomination = await nominations.findOne({
+    guildId: interaction.guildId,
+    normalizedTitle,
+    status: "nominated",
+  });
+
+  const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
+  let pollText = "";
+
+  if (nomination && activePoll) {
+    const pollOption = buildPollOption(nomination);
+    const optionIndex = activePoll.options.findIndex((option) => option.normalizedTitle === normalizedTitle);
+
+    if (optionIndex >= 0) {
+      await polls.updateOne(
+        { pollId: activePoll.pollId, guildId: interaction.guildId },
+        {
+          $set: {
+            [`options.${optionIndex}`]: pollOption,
+            updatedAt: now,
+          },
+        },
+      );
+      pollText = "\nUpdated this book in the active poll.";
+    } else if (activePoll.options.length >= getMaxPollOptions()) {
+      pollText = `\nThe active poll already has ${getMaxPollOptions()} books, so this nomination was saved for the next poll.`;
+    } else {
+      await polls.updateOne(
+        { pollId: activePoll.pollId, guildId: interaction.guildId },
+        {
+          $push: {
+            options: pollOption,
+          },
+          $set: {
+            updatedAt: now,
+          },
+        },
+      );
+      pollText = "\nAdded this book to the active poll.";
+    }
+
+    const updatedPoll = await polls.findOne({ pollId: activePoll.pollId, guildId: interaction.guildId });
+    if (updatedPoll) {
+      await refreshPollMessage(interaction, updatedPoll);
+    }
+  }
+
   const action = result.upsertedCount > 0 ? "Nominated" : "Updated the nomination for";
   const imageText = imageUrl ? `\nCover: ${imageUrl}` : "";
-  await interaction.reply(`${action} **${formatBookTitle(title, author)}**.${imageText}`);
+  await interaction.reply(`${action} **${formatBookTitle(title, author)}**.${imageText}${pollText}`);
 }

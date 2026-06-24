@@ -33,6 +33,16 @@ export interface PollOption {
   imageUrl: string | null;
 }
 
+export type PollType = "regular" | "ranked";
+
+export interface RankedPollVote {
+  first?: number;
+  second?: number;
+  third?: number;
+}
+
+export type PollVotes = Record<string, number | RankedPollVote>;
+
 export interface PollDocument {
   pollId: string;
   documentType: "poll";
@@ -40,8 +50,9 @@ export interface PollDocument {
   channelId: string;
   messageId: string | null;
   status: "active" | "closed";
+  pollType?: PollType;
   options: PollOption[];
-  votes: Record<string, number>;
+  votes: PollVotes;
   createdBy: string;
   createdByUsername: string;
   winner: PollOption | null;
