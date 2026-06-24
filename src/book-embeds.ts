@@ -61,8 +61,6 @@ export function buildBookAddedEmbed(options: BookAddedEmbedOptions) {
 
 export function buildBookRatingEmbed(options: BookRatingEmbedOptions) {
   const rating = Math.round(options.rating * 10) / 10;
-  const filledBlocks = Math.round(rating);
-  const ratingBar = `${"#".repeat(filledBlocks)}${"-".repeat(10 - filledBlocks)} ${rating.toFixed(1)}/10`;
   const embed = new EmbedBuilder()
     .setColor(0xd9a441)
     .setTitle(options.title)
@@ -70,7 +68,7 @@ export function buildBookRatingEmbed(options: BookRatingEmbedOptions) {
     .setTimestamp();
 
   embed.addFields(
-    { name: "Rating", value: `\`${ratingBar}\``, inline: true },
+    { name: "Rating", value: `**${rating.toFixed(1)}/10**`, inline: true },
     { name: "Rated by", value: options.ratedBy.toString(), inline: true },
   );
 

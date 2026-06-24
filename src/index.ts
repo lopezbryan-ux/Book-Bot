@@ -13,7 +13,12 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { mongoClient } from './mongo.js';
 import { handleBookPollVote, isBookPollVoteCustomId } from './polls.js';
-import { handleRatingListPage, isRatingListPageCustomId } from './rating-views.js';
+import {
+  handleBookLeaderboardPage,
+  handleRatingListPage,
+  isBookLeaderboardPageCustomId,
+  isRatingListPageCustomId,
+} from './rating-views.js';
 // Create a new client instance
 interface Command {
   data: { name: string };
@@ -131,6 +136,11 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 
       if (interaction.isButton() && isRatingListPageCustomId(interaction.customId)) {
         await handleRatingListPage(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && isBookLeaderboardPageCustomId(interaction.customId)) {
+        await handleBookLeaderboardPage(interaction);
       }
     } catch (error) {
       console.error(error);
