@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { mongoClient } from './mongo.js';
+import { handleBookPollVote, isBookPollVoteCustomId } from './polls.js';
 // Create a new client instance
 interface Command {
   data: { name: string };
@@ -88,15 +89,23 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 
   // Listen for interactions (slash commands)
   client.on(Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    console.log(interaction);
-    const command = client.commands.get(interaction.commandName);
-    if (!command) return;
-
     try {
-      await command.execute(interaction);
+      if (interaction.isChatInputCommand()) {
+        console.log(`Received /${interaction.commandName}`);
+        const command = client.commands.get(interaction.commandName);
+        if (!command) return;
+
+        await command.execute(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && isBookPollVoteCustomId(interaction.customId)) {
+        await handleBookPollVote(interaction);
+      }
     } catch (error) {
       console.error(error);
+      if (!interaction.isRepliable()) return;
+
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp({
           content: 'There was an error while executing this command!',

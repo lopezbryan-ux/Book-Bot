@@ -36,6 +36,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     {
       $set: {
         bookTitle: title,
+        documentType: 'rating',
         normalizedTitle: title.toLowerCase(),
         rating,
         review: review || null,

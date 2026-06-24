@@ -11,6 +11,8 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 const MONGODB_URI = process.env.MONGODB_URI;
 export const BOOK_BOT_DB_NAME = "BookBotCluster";
 export const BOOK_BOT_COLLECTION_NAME = "BookBotCollection";
+export const BOOK_NOMINATIONS_COLLECTION_NAME = "BookBotNominations";
+export const BOOK_POLLS_COLLECTION_NAME = "BookBotPolls";
 
 if (!MONGODB_URI) {
   throw new Error("MONGODB_URI is missing from the environment.");
