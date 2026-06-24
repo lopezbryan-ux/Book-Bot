@@ -4,6 +4,8 @@ import {
   NominationDocument,
   PollDocument,
   PollOption,
+  PollVotes,
+  RankedPollVote,
   formatBookTitle,
   getBookClubCollections,
   getImageUrlOrNull,
@@ -35,6 +37,50 @@ function buildPollOption(nomination: NominationDocument): PollOption {
     reason: nomination.reason,
     imageUrl: nomination.imageUrl,
   };
+}
+
+function isRankedPollVote(value: unknown): value is RankedPollVote {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function remapRegularVote(vote: number, indexMap: Map<number, number>) {
+  return indexMap.get(vote);
+}
+
+function remapRankedVote(vote: RankedPollVote, indexMap: Map<number, number>) {
+  const remappedVote: RankedPollVote = {};
+
+  for (const rankKey of ["first", "second", "third"] as const) {
+    const choice = vote[rankKey];
+    if (typeof choice !== "number") continue;
+
+    const remappedChoice = indexMap.get(choice);
+    if (typeof remappedChoice === "number") {
+      remappedVote[rankKey] = remappedChoice;
+    }
+  }
+
+  return remappedVote;
+}
+
+function remapPollVotes(votes: PollVotes, indexMap: Map<number, number>) {
+  const remappedVotes: PollVotes = {};
+
+  for (const [userId, vote] of Object.entries(votes ?? {})) {
+    if (typeof vote === "number") {
+      const remappedVote = remapRegularVote(vote, indexMap);
+      if (typeof remappedVote === "number") {
+        remappedVotes[userId] = remappedVote;
+      }
+      continue;
+    }
+
+    if (isRankedPollVote(vote)) {
+      remappedVotes[userId] = remapRankedVote(vote, indexMap);
+    }
+  }
+
+  return remappedVotes;
 }
 
 async function refreshPollMessage(interaction: ChatInputCommandInteraction, poll: PollDocument) {
@@ -77,11 +123,19 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const { nominations, polls } = getBookClubCollections();
   const now = new Date();
   const normalizedTitle = normalizeTitle(title);
+  const existingNomination = await nominations.findOne({
+    documentType: "nomination",
+    guildId: interaction.guildId,
+    nominatedBy: interaction.user.id,
+    status: "nominated",
+  });
+  const nominationId = existingNomination?.nominationId ?? randomUUID();
 
   const result = await nominations.updateOne(
     {
+      documentType: "nomination",
       guildId: interaction.guildId,
-      normalizedTitle,
+      nominatedBy: interaction.user.id,
       status: "nominated",
     },
     {
@@ -98,7 +152,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         updatedAt: now,
       },
       $setOnInsert: {
-        nominationId: randomUUID(),
+        nominationId,
         documentType: "nomination",
         status: "nominated",
         createdAt: now,
@@ -107,9 +161,18 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     { upsert: true },
   );
 
-  const nomination = await nominations.findOne({
+  await nominations.deleteMany({
+    documentType: "nomination",
     guildId: interaction.guildId,
-    normalizedTitle,
+    nominatedBy: interaction.user.id,
+    status: "nominated",
+    nominationId: { $ne: nominationId },
+  });
+
+  const nomination = await nominations.findOne({
+    documentType: "nomination",
+    guildId: interaction.guildId,
+    nominationId,
     status: "nominated",
   });
 
@@ -118,19 +181,33 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   if (nomination && activePoll) {
     const pollOption = buildPollOption(nomination);
-    const optionIndex = activePoll.options.findIndex((option) => option.normalizedTitle === normalizedTitle);
+    const optionIndex = activePoll.options.findIndex(
+      (option) => option.nominationId === nomination.nominationId || option.nominatedBy === interaction.user.id,
+    );
 
     if (optionIndex >= 0) {
+      const dedupedOptions: PollOption[] = [];
+      const indexMap = new Map<number, number>();
+
+      activePoll.options.forEach((option, index) => {
+        const belongsToCurrentNomination = option.nominationId === nomination.nominationId || option.nominatedBy === interaction.user.id;
+        if (belongsToCurrentNomination && index !== optionIndex) return;
+
+        indexMap.set(index, dedupedOptions.length);
+        dedupedOptions.push(index === optionIndex ? pollOption : option);
+      });
+
       await polls.updateOne(
         { pollId: activePoll.pollId, guildId: interaction.guildId },
         {
           $set: {
-            [`options.${optionIndex}`]: pollOption,
+            options: dedupedOptions,
+            votes: remapPollVotes(activePoll.votes, indexMap),
             updatedAt: now,
           },
         },
       );
-      pollText = "\nUpdated this book in the active poll.";
+      pollText = "\nReplaced your book in the active poll.";
     } else {
       await polls.updateOne(
         { pollId: activePoll.pollId, guildId: interaction.guildId },
@@ -152,7 +229,12 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     }
   }
 
-  const action = result.upsertedCount > 0 ? "Nominated" : "Updated the nomination for";
+  const action =
+    result.upsertedCount > 0
+      ? "Nominated"
+      : existingNomination
+        ? "Replaced your nomination with"
+        : "Updated your nomination for";
   const imageText = imageUrl ? `\nCover: ${imageUrl}` : "";
   await interaction.reply(`${action} **${formatBookTitle(title, author)}**.${imageText}${pollText}`);
 }
