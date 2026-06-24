@@ -15,6 +15,7 @@ export interface NominationDocument {
   normalizedTitle: string;
   author: string | null;
   reason: string | null;
+  imageUrl: string | null;
   status: "nominated" | "selected";
   nominatedBy: string;
   nominatedByUsername: string;
@@ -29,6 +30,7 @@ export interface PollOption {
   author: string | null;
   nominatedBy: string;
   reason: string | null;
+  imageUrl: string | null;
 }
 
 export interface PollDocument {
@@ -54,6 +56,7 @@ export interface BookDocument {
   title: string;
   normalizedTitle: string;
   author: string | null;
+  imageUrl: string | null;
   source: "manual" | "poll";
   sourcePollId: string | null;
   note: string | null;
@@ -69,6 +72,17 @@ export function normalizeTitle(title: string) {
 
 export function formatBookTitle(title: string, author?: string | null) {
   return author ? `${title} by ${author}` : title;
+}
+
+export function getImageUrlOrNull(imageUrl: string | null) {
+  if (!imageUrl) return null;
+
+  try {
+    const parsedUrl = new URL(imageUrl);
+    return parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:" ? parsedUrl.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 export function getBookClubCollections() {

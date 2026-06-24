@@ -56,6 +56,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       author: nomination.author,
       nominatedBy: nomination.nominatedBy,
       reason: nomination.reason,
+      imageUrl: nomination.imageUrl,
     })),
     votes: {},
     createdBy: interaction.user.id,

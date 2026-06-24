@@ -23,8 +23,9 @@ export function buildPollEmbed(poll: Pick<PollDocument, "options" | "pollId" | "
   const description = poll.options
     .map((option, index) => {
       const nomination = formatBookTitle(option.title, option.author);
+      const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
       const votes = voteCounts[index] ?? 0;
-      return `**${index + 1}.** ${nomination} - ${votes} vote${votes === 1 ? "" : "s"}`;
+      return `**${index + 1}.** ${nomination}${cover} - ${votes} vote${votes === 1 ? "" : "s"}`;
     })
     .join("\n");
 

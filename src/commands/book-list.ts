@@ -19,7 +19,10 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 
   const list = selectedBooks
-    .map((book, index) => `${index + 1}. **${formatBookTitle(book.title, book.author)}**`)
+    .map((book, index) => {
+      const cover = book.imageUrl ? ` ([cover](${book.imageUrl}))` : "";
+      return `${index + 1}. **${formatBookTitle(book.title, book.author)}**${cover}`;
+    })
     .join("\n");
 
   await interaction.reply(`**Book Club List**\n${list}`);

@@ -1,4 +1,5 @@
 import { ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
+import { buildBookAddedEmbed } from "../book-embeds.js";
 import { getBookClubCollections, formatBookTitle } from "../book-club.js";
 import { buildPollComponents, buildPollEmbed, getWinningOptions } from "../polls.js";
 
@@ -51,6 +52,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         title: winner.title,
         normalizedTitle: winner.normalizedTitle,
         author: winner.author,
+        imageUrl: winner.imageUrl,
         source: "poll",
         sourcePollId: poll.pollId,
         note: null,
@@ -96,9 +98,17 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     });
   }
 
-  await interaction.reply(
-    `Closed the poll. **${formatBookTitle(winner.title, winner.author)}** won with ${highestVoteCount} vote${
-      highestVoteCount === 1 ? "" : "s"
-    } and was added to the book list.`,
-  );
+  await interaction.reply({
+    content: `Closed the poll. The winner had ${highestVoteCount} vote${highestVoteCount === 1 ? "" : "s"}.`,
+    embeds: [
+      buildBookAddedEmbed({
+        action: "Poll winner added to the club book list",
+        title: winner.title,
+        author: winner.author,
+        imageUrl: winner.imageUrl,
+        note: null,
+        footerText: `Poll ID: ${poll.pollId}`,
+      }),
+    ],
+  });
 }
