@@ -49,8 +49,7 @@ export function buildBookAddedEmbed(options: BookAddedEmbedOptions) {
   }
 
   if (options.imageUrl) {
-    embed.setThumbnail(options.imageUrl);
-    embed.addFields({ name: "Cover", value: `[Open image](${options.imageUrl})`, inline: true });
+    embed.setImage(options.imageUrl);
   }
 
   if (options.footerText) {

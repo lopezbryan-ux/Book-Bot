@@ -158,7 +158,7 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
 
   const firstCover = pageRatings.map((rating) => booksByTitle.get(rating.normalizedTitle)?.imageUrl).find(Boolean);
   if (firstCover) {
-    embed.setThumbnail(firstCover);
+    embed.setImage(firstCover);
   }
 
   for (const rating of pageRatings) {
@@ -171,11 +171,10 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
         }`
       : "";
     const review = rating.review ? `\n> ${truncateReview(rating.review)}` : "";
-    const cover = book?.imageUrl ? `\n[Cover](${book.imageUrl})` : "";
     const updated = `\nUpdated ${formatDate(rating.updatedAt)}`;
     embed.addFields({
       name: "Rating",
-      value: `Your rating: \`${ratingDisplay.bar}\` **${ratingDisplay.value}**${averageText}${review}${cover}${updated}`,
+      value: `Your rating: \`${ratingDisplay.bar}\` **${ratingDisplay.value}**${averageText}${review}${updated}`,
     });
   }
 
