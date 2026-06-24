@@ -12,6 +12,7 @@ dotenv.config();
 
 interface DeployableCommand {
   data: {
+    name?: string;
     toJSON: () => unknown;
   };
 }
@@ -44,13 +45,19 @@ function isDeployableCommand(value: unknown): value is DeployableCommand {
   return typeof data?.toJSON === 'function';
 }
 
+function getDeployableCommand(commandModule: Record<string, unknown>): DeployableCommand | undefined {
+  const namedCommand = { data: commandModule.data };
+
+  return [commandModule.default, namedCommand, ...Object.values(commandModule)].find(isDeployableCommand);
+}
+
 const commandsPath = path.join(__dirname, 'commands');
 const commandFiles = getAllCommandFiles(commandsPath);
 
 async function loadCommands() {
   for (const filePath of commandFiles) {
     const commandModule = await import(pathToFileURL(filePath).href);
-    const command = [commandModule.default, ...Object.values(commandModule)].find(isDeployableCommand);
+    const command = getDeployableCommand(commandModule);
     if (command) {
       commands.push(command.data.toJSON());
     }
@@ -62,7 +69,7 @@ const rest = new REST().setToken(process.env.DISCORD_TOKEN!);
 (async () => {
   try {
     await loadCommands();
-    console.log('Started refreshing application (/) commands.');
+    console.log(`Started refreshing ${commands.length} application (/) command(s).`);
 
     await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID!, process.env.GUILD_ID!), { body: commands });
 

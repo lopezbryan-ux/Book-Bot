@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { MongoClient } from 'mongodb';
+import { mongoClient } from './mongo.js';
 // Create a new client instance
 interface Command {
   data: { name: string };
@@ -19,8 +19,6 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-// MongoDB client instance
-const mongoClient = new MongoClient(process.env.MONGODB_URI!);
 export { mongoClient };
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -30,7 +28,7 @@ if (!TOKEN) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessages],
+  intents: [GatewayIntentBits.Guilds],
 }) as ExtendedClient;
 
 client.commands = new Collection();
@@ -55,7 +53,18 @@ function getAllCommandFiles(dir: string): string[] {
 }
 
 function isCommand(value: unknown): value is Command {
-  return typeof value === 'object' && value !== null && 'data' in value && 'execute' in value;
+  if (typeof value !== 'object' || value === null || !('data' in value) || !('execute' in value)) {
+    return false;
+  }
+
+  const command = value as { data?: { name?: unknown }; execute?: unknown };
+  return typeof command.data?.name === 'string' && typeof command.execute === 'function';
+}
+
+function getCommand(commandModule: Record<string, unknown>): Command | undefined {
+  const namedCommand = { data: commandModule.data, execute: commandModule.execute };
+
+  return [commandModule.default, namedCommand, ...Object.values(commandModule)].find(isCommand);
 }
 
 (async () => {
@@ -64,7 +73,7 @@ function isCommand(value: unknown): value is Command {
 
   for (const filePath of commandFiles) {
     const commandModule = await import(pathToFileURL(filePath).href);
-    const command = Object.values(commandModule).find(isCommand);
+    const command = getCommand(commandModule);
     if (command) {
       client.commands.set(command.data.name, command);
     } else {
