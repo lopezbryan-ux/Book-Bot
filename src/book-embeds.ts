@@ -22,6 +22,13 @@ interface BookRatingEmbedOptions {
   ratedBy: User;
 }
 
+interface RatingRemovedEmbedOptions {
+  title: string;
+  author: string | null;
+  imageUrl: string | null;
+  removedBy: User;
+}
+
 export function buildBookAddedEmbed(options: BookAddedEmbedOptions) {
   const embed = new EmbedBuilder()
     .setColor(0x6f8f72)
@@ -81,6 +88,22 @@ export function buildBookRatingEmbed(options: BookRatingEmbedOptions) {
   if (options.review) {
     embed.addFields({ name: "Review", value: options.review });
   }
+
+  if (options.imageUrl) {
+    embed.setThumbnail(options.imageUrl);
+    embed.addFields({ name: "Cover", value: `[Open image](${options.imageUrl})`, inline: true });
+  }
+
+  return embed;
+}
+
+export function buildRatingRemovedEmbed(options: RatingRemovedEmbedOptions) {
+  const embed = new EmbedBuilder()
+    .setColor(0xb85c5c)
+    .setTitle(options.title)
+    .setDescription(options.author ? `by **${options.author}**` : "Rating removed")
+    .addFields({ name: "Removed rating for", value: options.removedBy.toString(), inline: true })
+    .setTimestamp();
 
   if (options.imageUrl) {
     embed.setThumbnail(options.imageUrl);
