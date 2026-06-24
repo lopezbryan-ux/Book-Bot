@@ -40,7 +40,7 @@ export async function autocomplete(interaction: AutocompleteInteraction) {
         guildId: interaction.guildId,
       };
 
-  const availableBooks = await books.find(query).sort({ selectedAt: -1 }).limit(25).toArray();
+  const availableBooks = await books.find(query).collation({ locale: "en", strength: 2 }).sort({ title: 1 }).limit(25).toArray();
 
   await interaction.respond(
     availableBooks.map((book) => ({
