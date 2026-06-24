@@ -9,7 +9,7 @@ import {
   getImageUrlOrNull,
   normalizeTitle,
 } from "../book-club.js";
-import { buildPollComponents, buildPollEmbed, getMaxPollOptions } from "../polls.js";
+import { buildPollComponents, buildPollEmbed } from "../polls.js";
 
 export const data = new SlashCommandBuilder()
   .setName("nominate-book")
@@ -131,8 +131,6 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         },
       );
       pollText = "\nUpdated this book in the active poll.";
-    } else if (activePoll.options.length >= getMaxPollOptions()) {
-      pollText = `\nThe active poll already has ${getMaxPollOptions()} books, so this nomination was saved for the next poll.`;
     } else {
       await polls.updateOne(
         { pollId: activePoll.pollId, guildId: interaction.guildId },

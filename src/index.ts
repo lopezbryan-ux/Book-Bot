@@ -12,7 +12,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { mongoClient } from './mongo.js';
-import { handleBookPollRank, handleBookPollVote, isBookPollRankCustomId, isBookPollVoteCustomId } from './polls.js';
+import {
+  handleBookPollPage,
+  handleBookPollRank,
+  handleBookPollVote,
+  isBookPollPageCustomId,
+  isBookPollRankCustomId,
+  isBookPollVoteCustomId,
+} from './polls.js';
 import {
   handleBookLeaderboardPage,
   handleRatingListPage,
@@ -131,6 +138,11 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 
       if (interaction.isButton() && isBookPollVoteCustomId(interaction.customId)) {
         await handleBookPollVote(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && isBookPollPageCustomId(interaction.customId)) {
+        await handleBookPollPage(interaction);
         return;
       }
 

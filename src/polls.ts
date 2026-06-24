@@ -12,18 +12,23 @@ import { getBookClubCollections, PollDocument, PollOption, PollType, RankedPollV
 
 const POLL_VOTE_PREFIX = "book-poll:vote";
 const POLL_RANK_PREFIX = "book-poll:rank";
+const POLL_PAGE_PREFIX = "book-poll:page";
 const RANK_KEYS = ["first", "second", "third"] as const;
 const RANK_WEIGHTS = [3, 2, 1] as const;
-const MAX_POLL_OPTIONS = 25;
+const POLL_OPTIONS_PER_PAGE = 20;
 
 type PollComponentRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>;
 
-export function buildPollCustomId(pollId: string, optionIndex: number) {
-  return `${POLL_VOTE_PREFIX}:${pollId}:${optionIndex}`;
+export function buildPollCustomId(pollId: string, optionIndex: number, page: number) {
+  return `${POLL_VOTE_PREFIX}:${pollId}:${optionIndex}:${page}`;
 }
 
-export function buildPollRankCustomId(pollId: string, rankIndex: number) {
-  return `${POLL_RANK_PREFIX}:${pollId}:${rankIndex}`;
+export function buildPollRankCustomId(pollId: string, rankIndex: number, page: number) {
+  return `${POLL_RANK_PREFIX}:${pollId}:${rankIndex}:${page}`;
+}
+
+export function buildPollPageCustomId(pollId: string, page: number) {
+  return `${POLL_PAGE_PREFIX}:${pollId}:${page}`;
 }
 
 export function isBookPollVoteCustomId(customId: string) {
@@ -34,8 +39,30 @@ export function isBookPollRankCustomId(customId: string) {
   return customId.startsWith(`${POLL_RANK_PREFIX}:`);
 }
 
+export function isBookPollPageCustomId(customId: string) {
+  return customId.startsWith(`${POLL_PAGE_PREFIX}:`);
+}
+
 function getPollType(poll: Pick<PollDocument, "pollType">): PollType {
   return poll.pollType ?? "regular";
+}
+
+function getPollTotalPages(poll: Pick<PollDocument, "options">) {
+  return Math.max(1, Math.ceil(poll.options.length / POLL_OPTIONS_PER_PAGE));
+}
+
+function getSafePollPage(poll: Pick<PollDocument, "options">, page: number) {
+  return Math.min(Math.max(page, 0), getPollTotalPages(poll) - 1);
+}
+
+function getPollPageOptions(poll: Pick<PollDocument, "options">, page: number) {
+  const safePage = getSafePollPage(poll, page);
+  const startIndex = safePage * POLL_OPTIONS_PER_PAGE;
+  return {
+    safePage,
+    startIndex,
+    options: poll.options.slice(startIndex, startIndex + POLL_OPTIONS_PER_PAGE),
+  };
 }
 
 function truncateMenuText(value: string, maxLength = 100) {
@@ -75,47 +102,57 @@ function buildRankedStatus(poll: Pick<PollDocument, "votes" | "options">) {
   return `${completeBallots} complete ranked ballot${completeBallots === 1 ? "" : "s"}`;
 }
 
-export function getMaxPollOptions() {
-  return MAX_POLL_OPTIONS;
-}
-
-export function buildPollEmbed(poll: Pick<PollDocument, "options" | "pollId" | "pollType" | "votes" | "status">) {
+export function buildPollEmbed(poll: Pick<PollDocument, "options" | "pollId" | "pollType" | "votes" | "status">, page = 0) {
   const pollType = getPollType(poll);
   const scores = getPollScores(poll);
-  const description = poll.options
-    .map((option, index) => {
-      const nomination = formatBookTitle(option.title, option.author);
-      const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
-      const score = scores[index] ?? 0;
-      return `**${index + 1}.** ${nomination}${cover} - ${formatScore(score, pollType)}`;
-    })
-    .join("\n");
+  const totalPages = getPollTotalPages(poll);
+  const { safePage, startIndex, options } = getPollPageOptions(poll, page);
+  const description =
+    poll.options.length === 0
+      ? "No books have been nominated yet. Use `/nominate-book` to add books to this poll."
+      : options
+          .map((option, index) => {
+            const optionIndex = startIndex + index;
+            const nomination = formatBookTitle(option.title, option.author);
+            const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
+            const score = scores[optionIndex] ?? 0;
+            return `**${optionIndex + 1}.** ${nomination}${cover} - ${formatScore(score, pollType)}`;
+          })
+          .join("\n");
 
   const statusText = pollType === "ranked" ? `Ranked poll - ${buildRankedStatus(poll)}` : "Regular poll";
+  const footerText =
+    totalPages > 1 ? `Poll ID: ${poll.pollId} - Page ${safePage + 1} of ${totalPages}` : `Poll ID: ${poll.pollId}`;
 
   return new EmbedBuilder()
     .setTitle(poll.status === "active" ? "Book Club Poll" : "Closed Book Club Poll")
     .setDescription(description)
     .addFields({ name: "Type", value: statusText })
-    .setFooter({ text: `Poll ID: ${poll.pollId}` });
+    .setFooter({ text: footerText });
 }
 
-export function buildPollComponents(poll: Pick<PollDocument, "options" | "pollId" | "pollType">, disabled = false) {
-  return getPollType(poll) === "ranked" ? buildRankedPollComponents(poll, disabled) : buildRegularPollComponents(poll, disabled);
+export function buildPollComponents(poll: Pick<PollDocument, "options" | "pollId" | "pollType">, disabled = false, page = 0) {
+  if (poll.options.length === 0) return [];
+
+  return getPollType(poll) === "ranked"
+    ? buildRankedPollComponents(poll, disabled, page)
+    : buildRegularPollComponents(poll, disabled, page);
 }
 
-function buildRegularPollComponents(poll: Pick<PollDocument, "options" | "pollId">, disabled = false) {
+function buildRegularPollComponents(poll: Pick<PollDocument, "options" | "pollId">, disabled = false, page = 0) {
   const rows: PollComponentRow[] = [];
+  const totalPages = getPollTotalPages(poll);
+  const { safePage, startIndex, options } = getPollPageOptions(poll, page);
 
-  for (let index = 0; index < poll.options.length; index += 5) {
+  for (let index = 0; index < options.length; index += 5) {
     const row = new ActionRowBuilder<ButtonBuilder>();
-    const options = poll.options.slice(index, index + 5);
+    const rowOptions = options.slice(index, index + 5);
 
-    for (const [offset, option] of options.entries()) {
-      const optionIndex = index + offset;
+    for (const [offset] of rowOptions.entries()) {
+      const optionIndex = startIndex + index + offset;
       row.addComponents(
         new ButtonBuilder()
-          .setCustomId(buildPollCustomId(poll.pollId, optionIndex))
+          .setCustomId(buildPollCustomId(poll.pollId, optionIndex, safePage))
           .setLabel(`${optionIndex + 1}`)
           .setStyle(ButtonStyle.Primary)
           .setDisabled(disabled),
@@ -125,21 +162,27 @@ function buildRegularPollComponents(poll: Pick<PollDocument, "options" | "pollId
     rows.push(row);
   }
 
+  if (!disabled && totalPages > 1) {
+    rows.push(buildPollPageRow(poll.pollId, safePage, totalPages));
+  }
+
   return rows;
 }
 
-function buildRankedPollComponents(poll: Pick<PollDocument, "options" | "pollId">, disabled = false) {
+function buildRankedPollComponents(poll: Pick<PollDocument, "options" | "pollId">, disabled = false, page = 0) {
   const rows: PollComponentRow[] = [];
-  const options = poll.options.slice(0, MAX_POLL_OPTIONS).map((option, index) => ({
-    label: truncateMenuText(`${index + 1}. ${formatBookTitle(option.title, option.author)}`),
-    value: String(index),
+  const totalPages = getPollTotalPages(poll);
+  const { safePage, startIndex, options: pageOptions } = getPollPageOptions(poll, page);
+  const options = pageOptions.map((option, index) => ({
+    label: truncateMenuText(`${startIndex + index + 1}. ${formatBookTitle(option.title, option.author)}`),
+    value: String(startIndex + index),
   }));
 
   for (let rankIndex = 0; rankIndex < RANK_KEYS.length; rankIndex += 1) {
     rows.push(
       new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
         new StringSelectMenuBuilder()
-          .setCustomId(buildPollRankCustomId(poll.pollId, rankIndex))
+          .setCustomId(buildPollRankCustomId(poll.pollId, rankIndex, safePage))
           .setPlaceholder(`Choose your #${rankIndex + 1} book`)
           .setMinValues(1)
           .setMaxValues(1)
@@ -149,7 +192,31 @@ function buildRankedPollComponents(poll: Pick<PollDocument, "options" | "pollId"
     );
   }
 
+  if (!disabled && totalPages > 1) {
+    rows.push(buildPollPageRow(poll.pollId, safePage, totalPages));
+  }
+
   return rows;
+}
+
+function buildPollPageRow(pollId: string, safePage: number, totalPages: number) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildPollPageCustomId(pollId, safePage - 1))
+      .setLabel("Prev")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage === 0),
+    new ButtonBuilder()
+      .setCustomId(buildPollPageCustomId(pollId, safePage))
+      .setLabel(`${safePage + 1}/${totalPages}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(buildPollPageCustomId(pollId, safePage + 1))
+      .setLabel("Next")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage >= totalPages - 1),
+  );
 }
 
 export function getPollScores(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
@@ -181,6 +248,10 @@ export function getPollScores(poll: Pick<PollDocument, "options" | "pollType" | 
 
 export function getWinningOptions(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
   const counts = getPollScores(poll);
+  if (counts.length === 0) {
+    return { counts, highestVoteCount: 0, winners: [] as PollOption[] };
+  }
+
   const highestVoteCount = Math.max(...counts);
 
   if (highestVoteCount === 0) {
@@ -192,10 +263,11 @@ export function getWinningOptions(poll: Pick<PollDocument, "options" | "pollType
 }
 
 export async function handleBookPollVote(interaction: ButtonInteraction) {
-  const [, , pollId, optionIndexText] = interaction.customId.split(":");
+  const [, , pollId, optionIndexText, pageText] = interaction.customId.split(":");
   const optionIndex = Number(optionIndexText);
+  const page = Number(pageText ?? 0);
 
-  if (!pollId || !Number.isInteger(optionIndex)) {
+  if (!pollId || !Number.isInteger(optionIndex) || !Number.isInteger(page)) {
     await interaction.reply({ content: "That poll vote button is invalid.", flags: MessageFlags.Ephemeral });
     return;
   }
@@ -232,8 +304,8 @@ export async function handleBookPollVote(interaction: ButtonInteraction) {
   const updatedPoll = await polls.findOne({ pollId, guildId: interaction.guildId });
   if (updatedPoll) {
     await interaction.update({
-      embeds: [buildPollEmbed(updatedPoll)],
-      components: buildPollComponents(updatedPoll),
+      embeds: [buildPollEmbed(updatedPoll, page)],
+      components: buildPollComponents(updatedPoll, false, page),
     });
 
     await interaction.followUp({
@@ -250,11 +322,18 @@ export async function handleBookPollVote(interaction: ButtonInteraction) {
 }
 
 export async function handleBookPollRank(interaction: StringSelectMenuInteraction) {
-  const [, , pollId, rankIndexText] = interaction.customId.split(":");
+  const [, , pollId, rankIndexText, pageText] = interaction.customId.split(":");
   const rankIndex = Number(rankIndexText);
   const optionIndex = Number(interaction.values[0]);
+  const page = Number(pageText);
 
-  if (!pollId || !Number.isInteger(rankIndex) || !Number.isInteger(optionIndex) || !RANK_KEYS[rankIndex]) {
+  if (
+    !pollId ||
+    !Number.isInteger(rankIndex) ||
+    !Number.isInteger(optionIndex) ||
+    !Number.isInteger(page) ||
+    !RANK_KEYS[rankIndex]
+  ) {
     await interaction.reply({ content: "That ranked poll menu is invalid.", flags: MessageFlags.Ephemeral });
     return;
   }
@@ -295,8 +374,8 @@ export async function handleBookPollRank(interaction: StringSelectMenuInteractio
   const updatedPoll = await polls.findOne({ pollId, guildId: interaction.guildId });
   if (updatedPoll) {
     await interaction.update({
-      embeds: [buildPollEmbed(updatedPoll)],
-      components: buildPollComponents(updatedPoll),
+      embeds: [buildPollEmbed(updatedPoll, page)],
+      components: buildPollComponents(updatedPoll, false, page),
     });
 
     const duplicateWarning = hasDuplicateRankedChoices(rankedVote)
@@ -319,5 +398,28 @@ export async function handleBookPollRank(interaction: StringSelectMenuInteractio
   await interaction.reply({
     content: `Your #${rankIndex + 1} choice is **${formatBookTitle(selectedOption.title, selectedOption.author)}**.`,
     flags: MessageFlags.Ephemeral,
+  });
+}
+
+export async function handleBookPollPage(interaction: ButtonInteraction) {
+  const [, , pollId, pageText] = interaction.customId.split(":");
+  const page = Number(pageText);
+
+  if (!pollId || !Number.isInteger(page)) {
+    await interaction.reply({ content: "That poll page button is invalid.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const { polls } = getBookClubCollections();
+  const poll = await polls.findOne({ pollId, guildId: interaction.guildId });
+
+  if (!poll || poll.status !== "active") {
+    await interaction.reply({ content: "That poll is no longer active.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  await interaction.update({
+    embeds: [buildPollEmbed(poll, page)],
+    components: buildPollComponents(poll, false, page),
   });
 }
