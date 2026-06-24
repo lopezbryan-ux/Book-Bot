@@ -11,10 +11,13 @@ interface BookAddedEmbedOptions {
 }
 
 interface BookRatingEmbedOptions {
+  heading?: string;
   title: string;
   author: string | null;
   imageUrl: string | null;
   rating: number;
+  averageRating?: number;
+  ratingCount?: number;
   review: string | null;
   ratedBy: User;
 }
@@ -56,16 +59,23 @@ export function buildBookRatingEmbed(options: BookRatingEmbedOptions) {
   const ratingBar = `${"#".repeat(filledBlocks)}${"-".repeat(10 - filledBlocks)} ${rating.toFixed(1)}/10`;
   const embed = new EmbedBuilder()
     .setColor(0xd9a441)
-    .setTitle("Book rating saved")
-    .setDescription(`**${options.title}**`)
-    .addFields(
-      { name: "Rating", value: `\`${ratingBar}\``, inline: true },
-      { name: "Rated by", value: options.ratedBy.toString(), inline: true },
-    )
+    .setTitle(options.title)
+    .setDescription(options.author ? `by **${options.author}**` : options.heading ?? "Book rating")
     .setTimestamp();
 
-  if (options.author) {
-    embed.addFields({ name: "Author", value: options.author, inline: true });
+  embed.addFields(
+    { name: "Rating", value: `\`${ratingBar}\``, inline: true },
+    { name: "Rated by", value: options.ratedBy.toString(), inline: true },
+  );
+
+  if (options.averageRating !== undefined && options.ratingCount !== undefined) {
+    embed.addFields({
+      name: "Club Average",
+      value: `${options.averageRating.toFixed(1)}/10 from ${options.ratingCount} rating${
+        options.ratingCount === 1 ? "" : "s"
+      }`,
+      inline: true,
+    });
   }
 
   if (options.review) {

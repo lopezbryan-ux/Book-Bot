@@ -119,7 +119,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   await interaction.reply({
     embeds: [
       buildBookRatingEmbed({
-        title: formatBookTitle(book.title, book.author),
+        title: book.title,
         author: book.author,
         imageUrl: book.imageUrl,
         rating,
