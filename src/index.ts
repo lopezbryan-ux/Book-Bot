@@ -1,4 +1,12 @@
-import { ChatInputCommandInteraction, Client, Collection, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
+import {
+  AutocompleteInteraction,
+  ChatInputCommandInteraction,
+  Client,
+  Collection,
+  Events,
+  GatewayIntentBits,
+  MessageFlags,
+} from 'discord.js';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,6 +17,7 @@ import { handleBookPollVote, isBookPollVoteCustomId } from './polls.js';
 interface Command {
   data: { name: string };
   execute: (interaction: ChatInputCommandInteraction) => Promise<void>;
+  autocomplete?: (interaction: AutocompleteInteraction) => Promise<void>;
 }
 
 interface ExtendedClient extends Client {
@@ -63,7 +72,11 @@ function isCommand(value: unknown): value is Command {
 }
 
 function getCommand(commandModule: Record<string, unknown>): Command | undefined {
-  const namedCommand = { data: commandModule.data, execute: commandModule.execute };
+  const namedCommand = {
+    data: commandModule.data,
+    execute: commandModule.execute,
+    autocomplete: commandModule.autocomplete,
+  };
 
   return [commandModule.default, namedCommand, ...Object.values(commandModule)].find(isCommand);
 }
@@ -90,6 +103,17 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
   // Listen for interactions (slash commands)
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
+      if (interaction.isAutocomplete()) {
+        const command = client.commands.get(interaction.commandName);
+        if (!command?.autocomplete) {
+          await interaction.respond([]);
+          return;
+        }
+
+        await command.autocomplete(interaction);
+        return;
+      }
+
       if (interaction.isChatInputCommand()) {
         console.log(`Received /${interaction.commandName}`);
         const command = client.commands.get(interaction.commandName);

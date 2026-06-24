@@ -10,6 +10,15 @@ interface BookAddedEmbedOptions {
   footerText?: string;
 }
 
+interface BookRatingEmbedOptions {
+  title: string;
+  author: string | null;
+  imageUrl: string | null;
+  rating: number;
+  review: string | null;
+  ratedBy: User;
+}
+
 export function buildBookAddedEmbed(options: BookAddedEmbedOptions) {
   const embed = new EmbedBuilder()
     .setColor(0x6f8f72)
@@ -36,6 +45,36 @@ export function buildBookAddedEmbed(options: BookAddedEmbedOptions) {
 
   if (options.footerText) {
     embed.setFooter({ text: options.footerText });
+  }
+
+  return embed;
+}
+
+export function buildBookRatingEmbed(options: BookRatingEmbedOptions) {
+  const rating = Math.round(options.rating * 10) / 10;
+  const filledBlocks = Math.round(rating);
+  const ratingBar = `${"#".repeat(filledBlocks)}${"-".repeat(10 - filledBlocks)} ${rating.toFixed(1)}/10`;
+  const embed = new EmbedBuilder()
+    .setColor(0xd9a441)
+    .setTitle("Book rating saved")
+    .setDescription(`**${options.title}**`)
+    .addFields(
+      { name: "Rating", value: `\`${ratingBar}\``, inline: true },
+      { name: "Rated by", value: options.ratedBy.toString(), inline: true },
+    )
+    .setTimestamp();
+
+  if (options.author) {
+    embed.addFields({ name: "Author", value: options.author, inline: true });
+  }
+
+  if (options.review) {
+    embed.addFields({ name: "Review", value: options.review });
+  }
+
+  if (options.imageUrl) {
+    embed.setThumbnail(options.imageUrl);
+    embed.addFields({ name: "Cover", value: `[Open image](${options.imageUrl})`, inline: true });
   }
 
   return embed;
