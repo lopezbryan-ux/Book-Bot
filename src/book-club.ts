@@ -54,8 +54,13 @@ export interface BookDocument {
   title: string;
   normalizedTitle: string;
   author: string | null;
-  sourcePollId: string;
+  source: "manual" | "poll";
+  sourcePollId: string | null;
+  note: string | null;
+  addedBy: string | null;
+  addedByUsername: string | null;
   selectedAt: Date;
+  updatedAt: Date;
 }
 
 export function normalizeTitle(title: string) {
