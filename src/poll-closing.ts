@@ -1,4 +1,4 @@
-import { Client } from "discord.js";
+import { Client, EmbedBuilder } from "discord.js";
 import { formatBookTitle, getBookClubCollections, PollDocument, RankedPollVote } from "./book-club.js";
 import { buildPollComponents, buildPollEmbed, getWinningOptions } from "./polls.js";
 
@@ -71,10 +71,14 @@ function buildVoteRevealLines(poll: PollDocument) {
 }
 
 function truncateAnnouncement(content: string) {
-  const maxLength = 1900;
+  const maxLength = 1024;
   if (content.length <= maxLength) return content;
 
   return `${content.slice(0, maxLength - 40)}\n...vote list truncated.`;
+}
+
+function formatPollType(poll: PollDocument) {
+  return poll.pollType === "ranked" ? "Ranked poll" : "Regular poll";
 }
 
 async function announcePollWinner(client: Client, poll: PollDocument, winner: PollDocument["winner"], scoreText: string) {
@@ -85,17 +89,28 @@ async function announcePollWinner(client: Client, poll: PollDocument, winner: Po
 
   const voteRevealLines = buildVoteRevealLines(poll);
   const voteRevealText =
-    voteRevealLines.length > 0
-      ? `\n\nVotes:\n${voteRevealLines.join("\n")}`
-      : "\n\nNo valid votes were recorded.";
+    voteRevealLines.length > 0 ? truncateAnnouncement(voteRevealLines.join("\n")) : "No valid votes were recorded.";
 
-  const content = `@everyone The book poll is over! The winner is **${formatBookTitle(
-      winner.title,
-      winner.author,
-    )}** with ${scoreText}.\nNominated by <@${winner.nominatedBy}>.${voteRevealText}`;
+  const embed = new EmbedBuilder()
+    .setColor(0x6f8f72)
+    .setTitle("Book Club Poll Winner")
+    .setDescription(`**${winner.title}**${winner.author ? `\nby **${winner.author}**` : ""}`)
+    .addFields(
+      { name: "Final score", value: scoreText, inline: true },
+      { name: "Poll type", value: formatPollType(poll), inline: true },
+      { name: "Nominated by", value: `<@${winner.nominatedBy}>`, inline: true },
+      { name: "Votes", value: voteRevealText },
+    )
+    .setFooter({ text: `Poll ID: ${poll.pollId}` })
+    .setTimestamp();
+
+  if (winner.imageUrl) {
+    embed.setImage(winner.imageUrl);
+  }
 
   await channel.send({
-    content: truncateAnnouncement(content),
+    content: `@everyone The book poll is over. **${formatBookTitle(winner.title, winner.author)}** won and has been added to the club list.`,
+    embeds: [embed],
     allowedMentions: {
       parse: ["everyone"],
       users: [winner.nominatedBy],
