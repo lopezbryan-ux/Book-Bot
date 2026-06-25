@@ -101,7 +101,6 @@ async function announcePollWinner(client: Client, poll: PollDocument, winner: Po
       { name: "Nominated by", value: `<@${winner.nominatedBy}>`, inline: true },
       { name: "Votes", value: voteRevealText },
     )
-    .setFooter({ text: `Poll ID: ${poll.pollId}` })
     .setTimestamp();
 
   if (winner.imageUrl) {
