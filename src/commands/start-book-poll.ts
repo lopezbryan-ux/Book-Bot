@@ -11,10 +11,17 @@ export const data = new SlashCommandBuilder()
       .setName("type")
       .setDescription("Choose how votes are counted.")
       .addChoices({ name: "Regular", value: "regular" }, { name: "Ranked", value: "ranked" }),
+  )
+  .addNumberOption((option) =>
+    option
+      .setName("hours")
+      .setDescription("How many hours the poll should stay open. Leave empty to close manually.")
+      .setMinValue(1),
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   const pollType = (interaction.options.getString("type") ?? "regular") as PollType;
+  const hours = interaction.options.getNumber("hours");
   const { nominations, polls } = getBookClubCollections();
 
   const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
@@ -32,6 +39,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     .toArray();
 
   const now = new Date();
+  const closesAt = hours ? new Date(now.getTime() + hours * 60 * 60 * 1000) : null;
   const poll: PollDocument = {
     pollId: randomUUID(),
     documentType: "poll",
@@ -55,6 +63,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     winner: null,
     createdAt: now,
     updatedAt: now,
+    closesAt,
     closedAt: null,
   };
 

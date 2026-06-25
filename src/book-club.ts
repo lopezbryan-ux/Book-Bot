@@ -58,6 +58,7 @@ export interface PollDocument {
   winner: PollOption | null;
   createdAt: Date;
   updatedAt: Date;
+  closesAt: Date | null;
   closedAt: Date | null;
 }
 

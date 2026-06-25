@@ -19,7 +19,9 @@ export const data = new SlashCommandBuilder()
   .addStringOption((option) =>
     option.setName("title").setDescription("The title of the book you want to nominate.").setRequired(true),
   )
-  .addStringOption((option) => option.setName("author").setDescription("The book author.").setMaxLength(200))
+  .addStringOption((option) =>
+    option.setName("author").setDescription("The book author.").setMaxLength(200).setRequired(true),
+  )
   .addStringOption((option) =>
     option.setName("reason").setDescription("Why you think the club should read it.").setMaxLength(1000),
   )

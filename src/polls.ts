@@ -102,7 +102,20 @@ function buildRankedStatus(poll: Pick<PollDocument, "votes" | "options">) {
   return `${completeBallots} complete ranked ballot${completeBallots === 1 ? "" : "s"}`;
 }
 
-export function buildPollEmbed(poll: Pick<PollDocument, "options" | "pollId" | "pollType" | "votes" | "status">, page = 0) {
+function formatPollCloseTime(closesAt?: Date | string | null) {
+  if (!closesAt) return "Manual close";
+
+  const closeDate = closesAt instanceof Date ? closesAt : new Date(closesAt);
+  if (Number.isNaN(closeDate.getTime())) return "Manual close";
+
+  const unixTimestamp = Math.floor(closeDate.getTime() / 1000);
+  return `<t:${unixTimestamp}:f> (<t:${unixTimestamp}:R>)`;
+}
+
+export function buildPollEmbed(
+  poll: Pick<PollDocument, "closesAt" | "options" | "pollId" | "pollType" | "votes" | "status">,
+  page = 0,
+) {
   const pollType = getPollType(poll);
   const scores = getPollScores(poll);
   const totalPages = getPollTotalPages(poll);
@@ -127,7 +140,7 @@ export function buildPollEmbed(poll: Pick<PollDocument, "options" | "pollId" | "
   return new EmbedBuilder()
     .setTitle(poll.status === "active" ? "Book Club Poll" : "Closed Book Club Poll")
     .setDescription(description)
-    .addFields({ name: "Type", value: statusText })
+    .addFields({ name: "Type", value: statusText }, { name: "Closes", value: formatPollCloseTime(poll.closesAt) })
     .setFooter({ text: footerText });
 }
 
