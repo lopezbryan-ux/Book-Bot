@@ -1,5 +1,5 @@
 import { Client } from "discord.js";
-import { formatBookTitle, getBookClubCollections, PollDocument } from "./book-club.js";
+import { formatBookTitle, getBookClubCollections, PollDocument, RankedPollVote } from "./book-club.js";
 import { buildPollComponents, buildPollEmbed, getWinningOptions } from "./polls.js";
 
 interface CloseActiveBookPollsOptions {
@@ -26,6 +26,80 @@ async function updatePollMessage(client: Client, poll: PollDocument, closedPoll:
   await pollMessage?.edit({
     embeds: [buildPollEmbed(closedPoll)],
     components: buildPollComponents(closedPoll, true),
+  });
+}
+
+function isRankedPollVote(value: unknown): value is RankedPollVote {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function buildVoteRevealLines(poll: PollDocument) {
+  const lines: string[] = [];
+
+  for (const [userId, vote] of Object.entries(poll.votes ?? {})) {
+    if (typeof vote === "number") {
+      const option = poll.options[vote];
+      if (!option) continue;
+
+      lines.push(`- <@${userId}> voted for **${formatBookTitle(option.title, option.author)}**: 1 point`);
+      continue;
+    }
+
+    if (!isRankedPollVote(vote)) continue;
+
+    const rankedLines = [
+      { label: "#1", optionIndex: vote.first, points: 3 },
+      { label: "#2", optionIndex: vote.second, points: 2 },
+      { label: "#3", optionIndex: vote.third, points: 1 },
+    ]
+      .map(({ label, optionIndex, points }) => {
+        if (typeof optionIndex !== "number") return null;
+
+        const option = poll.options[optionIndex];
+        if (!option) return null;
+
+        return `${label} **${formatBookTitle(option.title, option.author)}** (${points} point${points === 1 ? "" : "s"})`;
+      })
+      .filter((line): line is string => Boolean(line));
+
+    if (rankedLines.length > 0) {
+      lines.push(`- <@${userId}>: ${rankedLines.join(", ")}`);
+    }
+  }
+
+  return lines;
+}
+
+function truncateAnnouncement(content: string) {
+  const maxLength = 1900;
+  if (content.length <= maxLength) return content;
+
+  return `${content.slice(0, maxLength - 40)}\n...vote list truncated.`;
+}
+
+async function announcePollWinner(client: Client, poll: PollDocument, winner: PollDocument["winner"], scoreText: string) {
+  if (!winner) return;
+
+  const channel = await client.channels.fetch(poll.channelId).catch(() => null);
+  if (!channel?.isTextBased() || !("send" in channel)) return;
+
+  const voteRevealLines = buildVoteRevealLines(poll);
+  const voteRevealText =
+    voteRevealLines.length > 0
+      ? `\n\nVotes:\n${voteRevealLines.join("\n")}`
+      : "\n\nNo valid votes were recorded.";
+
+  const content = `@everyone The book poll is over! The winner is **${formatBookTitle(
+      winner.title,
+      winner.author,
+    )}** with ${scoreText}.\nNominated by <@${winner.nominatedBy}>.${voteRevealText}`;
+
+  await channel.send({
+    content: truncateAnnouncement(content),
+    allowedMentions: {
+      parse: ["everyone"],
+      users: [winner.nominatedBy],
+    },
   });
 }
 
@@ -111,10 +185,11 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
     await updatePollMessage(options.client, poll, closedPoll);
 
     if (winner && addWinners) {
+      const scoreText = `${highestVoteCount} ${scoreLabel}${highestVoteCount === 1 ? "" : "s"}`;
+      await announcePollWinner(options.client, poll, winner, scoreText);
+
       summaries.push(
-        `- Closed \`${poll.pollId}\`: added **${formatBookTitle(winner.title, winner.author)}** with ${highestVoteCount} ${scoreLabel}${
-          highestVoteCount === 1 ? "" : "s"
-        }.`,
+        `- Closed \`${poll.pollId}\`: added **${formatBookTitle(winner.title, winner.author)}** with ${scoreText}.`,
       );
     } else if (winner) {
       summaries.push(
