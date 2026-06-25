@@ -15,13 +15,14 @@ export const data = new SlashCommandBuilder()
   .addNumberOption((option) =>
     option
       .setName("hours")
-      .setDescription("How many hours the poll should stay open. Leave empty to close manually.")
+      .setDescription("How many hours the poll should stay open.")
+      .setRequired(true)
       .setMinValue(1),
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   const pollType = (interaction.options.getString("type") ?? "regular") as PollType;
-  const hours = interaction.options.getNumber("hours");
+  const hours = interaction.options.getNumber("hours", true);
   const { nominations, polls } = getBookClubCollections();
 
   const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
@@ -39,7 +40,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     .toArray();
 
   const now = new Date();
-  const closesAt = hours ? new Date(now.getTime() + hours * 60 * 60 * 1000) : null;
+  const closesAt = new Date(now.getTime() + hours * 60 * 60 * 1000);
   const poll: PollDocument = {
     pollId: randomUUID(),
     documentType: "poll",
