@@ -1,5 +1,6 @@
 import { AutocompleteInteraction, ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
 import { formatBookTitle, getBookClubCollections, normalizeTitle } from "../book-club.js";
+import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "../mongo.js";
 
 export const data = new SlashCommandBuilder()
   .setName("delete-book")
@@ -59,6 +60,23 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   if (!book) {
     await interaction.reply({
       content: "That book is not in the club book list.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const ratings = mongoClient.db(BOOK_BOT_DB_NAME).collection(BOOK_BOT_COLLECTION_NAME);
+  const ratingCount = await ratings.countDocuments({
+    documentType: "rating",
+    guildId: interaction.guildId,
+    normalizedTitle: book.normalizedTitle,
+  });
+
+  if (ratingCount > 0) {
+    await interaction.reply({
+      content: `I cannot delete **${formatBookTitle(book.title, book.author)}** because it has ${ratingCount} rating${
+        ratingCount === 1 ? "" : "s"
+      }.`,
       flags: MessageFlags.Ephemeral,
     });
     return;
