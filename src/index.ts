@@ -29,6 +29,7 @@ import {
   isBookLeaderboardPageCustomId,
   isRatingListPageCustomId,
 } from './rating-views.js';
+import { handleHelpPage, isHelpPageCustomId } from './help.js';
 // Create a new client instance
 interface Command {
   data: { name: string };
@@ -188,6 +189,11 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 
       if (interaction.isButton() && isBookLeaderboardPageCustomId(interaction.customId)) {
         await handleBookLeaderboardPage(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && isHelpPageCustomId(interaction.customId)) {
+        await handleHelpPage(interaction);
       }
     } catch (error) {
       console.error(error);
