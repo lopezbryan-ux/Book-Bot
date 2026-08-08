@@ -326,14 +326,18 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
     const author = book?.author ?? entry.author ?? "Unknown author";
     const aiSummary = aiSummaries.get(entry._id);
     const ratingCountLabel = `${entry.ratingCount} rating${entry.ratingCount === 1 ? "" : "s"}`;
-    const ratingSummary = aiSummary?.ratingSummary || "No written review summary is available yet.";
+    const fieldLines = [
+      `Author: ${author}`,
+      `Average Rating: **${entry.averageRating.toFixed(1)}/10** from ${ratingCountLabel}`,
+    ];
+
+    if (aiSummary?.ratingSummary) {
+      fieldLines.push(`Rating Summary: ${aiSummary.ratingSummary}`);
+    }
 
     embed.addFields({
       name: truncateEmbedFieldName(`${rank}. ${title}`),
-      value: truncateEmbedValue(
-        `Author: ${author}\nAverage Rating: **${entry.averageRating.toFixed(1)}/10** from ${ratingCountLabel}\nRating Summary: ${ratingSummary}`,
-        1024,
-      ),
+      value: truncateEmbedValue(fieldLines.join("\n"), 1024),
     });
   }
 
