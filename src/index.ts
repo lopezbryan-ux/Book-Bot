@@ -16,9 +16,11 @@ import { closeOverdueBookPolls } from './poll-closing.js';
 import {
   handleBookPollPage,
   handleBookPollRank,
+  handleBookPollRankOpen,
   handleBookPollVote,
   isBookPollPageCustomId,
   isBookPollRankCustomId,
+  isBookPollRankOpenCustomId,
   isBookPollVoteCustomId,
 } from './polls.js';
 import {
@@ -166,6 +168,11 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 
       if (interaction.isButton() && isBookPollPageCustomId(interaction.customId)) {
         await handleBookPollPage(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && isBookPollRankOpenCustomId(interaction.customId)) {
+        await handleBookPollRankOpen(interaction);
         return;
       }
 

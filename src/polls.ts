@@ -12,6 +12,7 @@ import { getBookClubCollections, PollDocument, PollOption, PollType, RankedPollV
 
 const POLL_VOTE_PREFIX = "book-poll:vote";
 const POLL_RANK_PREFIX = "book-poll:rank";
+const POLL_RANK_OPEN_PREFIX = "book-poll:rank-open";
 const POLL_PAGE_PREFIX = "book-poll:page";
 const RANK_KEYS = ["first", "second", "third"] as const;
 const RANK_WEIGHTS = [3, 2, 1] as const;
@@ -30,6 +31,10 @@ export function buildPollRankCustomId(pollId: string, rankIndex: number, page: n
   return `${POLL_RANK_PREFIX}:${pollId}:${rankIndex}:${page}`;
 }
 
+export function buildPollRankOpenCustomId(pollId: string, page: number) {
+  return `${POLL_RANK_OPEN_PREFIX}:${pollId}:${page}`;
+}
+
 export function buildPollPageCustomId(pollId: string, page: number) {
   return `${POLL_PAGE_PREFIX}:${pollId}:${page}`;
 }
@@ -40,6 +45,10 @@ export function isBookPollVoteCustomId(customId: string) {
 
 export function isBookPollRankCustomId(customId: string) {
   return customId.startsWith(`${POLL_RANK_PREFIX}:`);
+}
+
+export function isBookPollRankOpenCustomId(customId: string) {
+  return customId.startsWith(`${POLL_RANK_OPEN_PREFIX}:`);
 }
 
 export function isBookPollPageCustomId(customId: string) {
@@ -228,7 +237,9 @@ export function buildPollComponents(poll: PollComponentPoll, disabled = false, p
   if (poll.options.length === 0) return [];
 
   return getPollType(poll) === "ranked"
-    ? buildRankedPollComponents(poll, disabled, page, viewerUserId)
+    ? viewerUserId
+      ? buildRankedPollBallotComponents(poll, disabled, page, viewerUserId)
+      : buildRankedPollOpenComponents(poll, disabled, page)
     : buildRegularPollComponents(poll, disabled, page);
 }
 
@@ -262,11 +273,33 @@ function buildRegularPollComponents(poll: Pick<PollDocument, "options" | "pollId
   return rows;
 }
 
-function buildRankedPollComponents(
+function buildRankedPollOpenComponents(poll: Pick<PollDocument, "options" | "pollId">, disabled = false, page = 0) {
+  const rows: PollComponentRow[] = [];
+  const totalPages = getPollTotalPages(poll);
+  const safePage = getSafePollPage(poll, page);
+
+  rows.push(
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(buildPollRankOpenCustomId(poll.pollId, safePage))
+        .setLabel("Rank books")
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(disabled),
+    ),
+  );
+
+  if (!disabled && totalPages > 1) {
+    rows.push(buildPollPageRow(poll.pollId, safePage, totalPages));
+  }
+
+  return rows;
+}
+
+function buildRankedPollBallotComponents(
   poll: Pick<PollDocument, "options" | "pollId" | "votes">,
   disabled = false,
   page = 0,
-  viewerUserId?: string,
+  viewerUserId: string,
 ) {
   const rows: PollComponentRow[] = [];
   const totalPages = getPollTotalPages(poll);
@@ -342,6 +375,14 @@ async function refreshPublicPollMessage(interaction: ButtonInteraction | StringS
     embeds: [buildPollEmbed(poll, page)],
     components: buildPollComponents(poll, false, page),
   });
+}
+
+function buildPrivateRankedBallot(poll: PollDocument, page: number, userId: string, content = "Your ranked ballot for this poll:") {
+  return {
+    content,
+    embeds: [buildPollEmbed(poll, page)],
+    components: buildPollComponents(poll, false, page, userId),
+  };
 }
 
 export function getPollScores(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
@@ -446,6 +487,34 @@ export async function handleBookPollVote(interaction: ButtonInteraction) {
   });
 }
 
+export async function handleBookPollRankOpen(interaction: ButtonInteraction) {
+  const [, , pollId, pageText] = interaction.customId.split(":");
+  const page = Number(pageText);
+
+  if (!pollId || !Number.isInteger(page)) {
+    await interaction.reply({ content: "That ranked poll button is invalid.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const { polls } = getBookClubCollections();
+  const poll = await polls.findOne({ pollId, guildId: interaction.guildId });
+
+  if (!poll || poll.status !== "active") {
+    await interaction.reply({ content: "That poll is no longer active.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  if (getPollType(poll) !== "ranked") {
+    await interaction.reply({ content: "Use the vote buttons for this regular poll.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  await interaction.reply({
+    ...buildPrivateRankedBallot(poll, page, interaction.user.id),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
 export async function handleBookPollRank(interaction: StringSelectMenuInteraction) {
   const [, , pollId, rankIndexText, pageText] = interaction.customId.split(":");
   const rankIndex = Number(rankIndexText);
@@ -508,11 +577,7 @@ export async function handleBookPollRank(interaction: StringSelectMenuInteractio
       selectedOption.title,
       selectedOption.author,
     )}**.${duplicateWarning || completionText}`;
-    const privateBallot = {
-      content,
-      embeds: [buildPollEmbed(updatedPoll, page)],
-      components: buildPollComponents(updatedPoll, false, page, interaction.user.id),
-    };
+    const privateBallot = buildPrivateRankedBallot(updatedPoll, page, interaction.user.id, content);
 
     if (isEphemeralMessageInteraction(interaction)) {
       await interaction.update(privateBallot);
@@ -551,11 +616,7 @@ export async function handleBookPollPage(interaction: ButtonInteraction) {
   }
 
   if (getPollType(poll) === "ranked" && isEphemeralMessageInteraction(interaction)) {
-    await interaction.update({
-      content: "Your ranked ballot for this poll:",
-      embeds: [buildPollEmbed(poll, page)],
-      components: buildPollComponents(poll, false, page, interaction.user.id),
-    });
+    await interaction.update(buildPrivateRankedBallot(poll, page, interaction.user.id));
     return;
   }
 
