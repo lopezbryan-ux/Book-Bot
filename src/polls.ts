@@ -18,6 +18,7 @@ const RANK_WEIGHTS = [3, 2, 1] as const;
 const POLL_OPTIONS_PER_PAGE = 20;
 
 type PollComponentRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>;
+type PollComponentPoll = Pick<PollDocument, "options" | "pollId" | "pollType" | "votes">;
 
 export function buildPollCustomId(pollId: string, optionIndex: number, page: number) {
   return `${POLL_VOTE_PREFIX}:${pollId}:${optionIndex}:${page}`;
@@ -90,6 +91,28 @@ function isCompleteRankedVote(vote: RankedPollVote, optionCount: number) {
   );
 }
 
+function getRankedVoteForUser(poll: Pick<PollDocument, "votes">, userId?: string) {
+  if (!userId) return null;
+
+  const vote = poll.votes?.[userId];
+  return isRankedPollVote(vote) ? vote : null;
+}
+
+function getRankedChoiceForUser(poll: Pick<PollDocument, "options" | "votes">, rankIndex: number, userId?: string) {
+  const vote = getRankedVoteForUser(poll, userId);
+  if (!vote) return null;
+
+  const choice = vote[RANK_KEYS[rankIndex]];
+  return typeof choice === "number" && choice >= 0 && choice < poll.options.length ? choice : null;
+}
+
+function getRankedChoicePlaceholder(poll: Pick<PollDocument, "options">, rankIndex: number, selectedOptionIndex: number | null) {
+  const option = typeof selectedOptionIndex === "number" ? poll.options[selectedOptionIndex] : null;
+  if (!option) return `Choose your #${rankIndex + 1} book`;
+
+  return truncateMenuText(`#${rankIndex + 1}: ${formatBookTitle(option.title, option.author)}`, 150);
+}
+
 function formatScore(value: number, pollType: PollType) {
   const label = pollType === "ranked" ? "point" : "vote";
   return `${value} ${label}${value === 1 ? "" : "s"}`;
@@ -144,11 +167,11 @@ export function buildPollEmbed(
     .setFooter({ text: footerText });
 }
 
-export function buildPollComponents(poll: Pick<PollDocument, "options" | "pollId" | "pollType">, disabled = false, page = 0) {
+export function buildPollComponents(poll: PollComponentPoll, disabled = false, page = 0, viewerUserId?: string) {
   if (poll.options.length === 0) return [];
 
   return getPollType(poll) === "ranked"
-    ? buildRankedPollComponents(poll, disabled, page)
+    ? buildRankedPollComponents(poll, disabled, page, viewerUserId)
     : buildRegularPollComponents(poll, disabled, page);
 }
 
@@ -182,21 +205,32 @@ function buildRegularPollComponents(poll: Pick<PollDocument, "options" | "pollId
   return rows;
 }
 
-function buildRankedPollComponents(poll: Pick<PollDocument, "options" | "pollId">, disabled = false, page = 0) {
+function buildRankedPollComponents(
+  poll: Pick<PollDocument, "options" | "pollId" | "votes">,
+  disabled = false,
+  page = 0,
+  viewerUserId?: string,
+) {
   const rows: PollComponentRow[] = [];
   const totalPages = getPollTotalPages(poll);
   const { safePage, startIndex, options: pageOptions } = getPollPageOptions(poll, page);
-  const options = pageOptions.map((option, index) => ({
-    label: truncateMenuText(`${startIndex + index + 1}. ${formatBookTitle(option.title, option.author)}`),
-    value: String(startIndex + index),
-  }));
 
   for (let rankIndex = 0; rankIndex < RANK_KEYS.length; rankIndex += 1) {
+    const selectedOptionIndex = getRankedChoiceForUser(poll, rankIndex, viewerUserId);
+    const options = pageOptions.map((option, index) => {
+      const optionIndex = startIndex + index;
+      return {
+        default: optionIndex === selectedOptionIndex,
+        label: truncateMenuText(`${optionIndex + 1}. ${formatBookTitle(option.title, option.author)}`),
+        value: String(optionIndex),
+      };
+    });
+
     rows.push(
       new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
         new StringSelectMenuBuilder()
           .setCustomId(buildPollRankCustomId(poll.pollId, rankIndex, safePage))
-          .setPlaceholder(`Choose your #${rankIndex + 1} book`)
+          .setPlaceholder(getRankedChoicePlaceholder(poll, rankIndex, selectedOptionIndex))
           .setMinValues(1)
           .setMaxValues(1)
           .setOptions(options)
@@ -230,6 +264,27 @@ function buildPollPageRow(pollId: string, safePage: number, totalPages: number) 
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(safePage >= totalPages - 1),
   );
+}
+
+function isEphemeralMessageInteraction(interaction: ButtonInteraction | StringSelectMenuInteraction) {
+  return interaction.message.flags.has(MessageFlags.Ephemeral);
+}
+
+async function refreshPublicPollMessage(interaction: ButtonInteraction | StringSelectMenuInteraction, poll: PollDocument, page = 0) {
+  if (!poll.messageId) return;
+
+  const channel =
+    poll.channelId === interaction.channelId
+      ? interaction.channel
+      : await interaction.client.channels.fetch(poll.channelId).catch(() => null);
+
+  if (!channel?.isTextBased() || !("messages" in channel)) return;
+
+  const pollMessage = await channel.messages.fetch(poll.messageId).catch(() => null);
+  await pollMessage?.edit({
+    embeds: [buildPollEmbed(poll, page)],
+    components: buildPollComponents(poll, false, page),
+  });
 }
 
 export function getPollScores(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
@@ -386,25 +441,32 @@ export async function handleBookPollRank(interaction: StringSelectMenuInteractio
 
   const updatedPoll = await polls.findOne({ pollId, guildId: interaction.guildId });
   if (updatedPoll) {
-    await interaction.update({
-      embeds: [buildPollEmbed(updatedPoll, page)],
-      components: buildPollComponents(updatedPoll, false, page),
-    });
-
     const duplicateWarning = hasDuplicateRankedChoices(rankedVote)
       ? " Pick three different books before the poll closes."
       : "";
     const completionText = isCompleteRankedVote(rankedVote, updatedPoll.options.length)
       ? " Your ranked ballot is complete."
       : " Choose your remaining ranked picks to complete your ballot.";
+    const content = `Your #${rankIndex + 1} choice is **${formatBookTitle(
+      selectedOption.title,
+      selectedOption.author,
+    )}**.${duplicateWarning || completionText}`;
+    const privateBallot = {
+      content,
+      embeds: [buildPollEmbed(updatedPoll, page)],
+      components: buildPollComponents(updatedPoll, false, page, interaction.user.id),
+    };
 
-    await interaction.followUp({
-      content: `Your #${rankIndex + 1} choice is **${formatBookTitle(
-        selectedOption.title,
-        selectedOption.author,
-      )}**.${duplicateWarning || completionText}`,
-      flags: MessageFlags.Ephemeral,
-    });
+    if (isEphemeralMessageInteraction(interaction)) {
+      await interaction.update(privateBallot);
+    } else {
+      await interaction.reply({
+        ...privateBallot,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    await refreshPublicPollMessage(interaction, updatedPoll, page);
     return;
   }
 
@@ -428,6 +490,15 @@ export async function handleBookPollPage(interaction: ButtonInteraction) {
 
   if (!poll || poll.status !== "active") {
     await interaction.reply({ content: "That poll is no longer active.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  if (getPollType(poll) === "ranked" && isEphemeralMessageInteraction(interaction)) {
+    await interaction.update({
+      content: "Your ranked ballot for this poll:",
+      embeds: [buildPollEmbed(poll, page)],
+      components: buildPollComponents(poll, false, page, interaction.user.id),
+    });
     return;
   }
 
