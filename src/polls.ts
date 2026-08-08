@@ -16,6 +16,8 @@ const POLL_PAGE_PREFIX = "book-poll:page";
 const RANK_KEYS = ["first", "second", "third"] as const;
 const RANK_WEIGHTS = [3, 2, 1] as const;
 const POLL_OPTIONS_PER_PAGE = 20;
+const REGULAR_POLL_BAR_SEGMENTS = 12;
+const MAX_VISIBLE_VOTERS_PER_OPTION = 4;
 
 type PollComponentRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>;
 type PollComponentPoll = Pick<PollDocument, "options" | "pollId" | "pollType" | "votes">;
@@ -118,6 +120,59 @@ function formatScore(value: number, pollType: PollType) {
   return `${value} ${label}${value === 1 ? "" : "s"}`;
 }
 
+function getRegularPollVotersByOption(poll: Pick<PollDocument, "options" | "votes">) {
+  const votersByOption = Array.from({ length: poll.options.length }, () => [] as string[]);
+
+  for (const [userId, optionIndex] of Object.entries(poll.votes ?? {})) {
+    if (typeof optionIndex === "number" && Number.isInteger(optionIndex) && optionIndex >= 0 && optionIndex < votersByOption.length) {
+      votersByOption[optionIndex].push(userId);
+    }
+  }
+
+  return votersByOption;
+}
+
+function buildRegularPollBar(voteCount: number, totalVotes: number) {
+  const filledSegments =
+    voteCount === 0 ? 0 : Math.max(1, Math.round((voteCount / totalVotes) * REGULAR_POLL_BAR_SEGMENTS));
+  return `${"█".repeat(filledSegments)}${"░".repeat(REGULAR_POLL_BAR_SEGMENTS - filledSegments)}`;
+}
+
+function formatRegularPollVoters(voters: string[]) {
+  if (voters.length === 0) return "No votes yet";
+
+  const visibleVoters = voters.slice(0, MAX_VISIBLE_VOTERS_PER_OPTION).map((userId) => `<@${userId}>`);
+  const hiddenCount = voters.length - visibleVoters.length;
+  return hiddenCount > 0 ? `${visibleVoters.join(", ")} and ${hiddenCount} more` : visibleVoters.join(", ");
+}
+
+function buildRegularPollDescription(
+  poll: Pick<PollDocument, "options" | "votes">,
+  options: PollOption[],
+  startIndex: number,
+  scores: number[],
+) {
+  const votersByOption = getRegularPollVotersByOption(poll);
+  const totalVotes = votersByOption.reduce((sum, voters) => sum + voters.length, 0);
+
+  return options
+    .map((option, index) => {
+      const optionIndex = startIndex + index;
+      const nomination = formatBookTitle(option.title, option.author);
+      const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
+      const score = scores[optionIndex] ?? 0;
+      const percentage = totalVotes === 0 ? 0 : Math.round((score / totalVotes) * 100);
+      const voters = votersByOption[optionIndex] ?? [];
+
+      return [
+        `**${optionIndex + 1}.** ${nomination}${cover}`,
+        `\`${buildRegularPollBar(score, totalVotes)}\` ${formatScore(score, "regular")} - ${percentage}%`,
+        `Voters: ${formatRegularPollVoters(voters)}`,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
 function buildRankedStatus(poll: Pick<PollDocument, "votes" | "options">) {
   const ballots = Object.values(poll.votes ?? {}).filter(isRankedPollVote);
   const completeBallots = ballots.filter((vote) => isCompleteRankedVote(vote, poll.options.length)).length;
@@ -146,15 +201,17 @@ export function buildPollEmbed(
   const description =
     poll.options.length === 0
       ? "No books have been nominated yet. Use `/nominate-book` to add books to this poll."
-      : options
-          .map((option, index) => {
-            const optionIndex = startIndex + index;
-            const nomination = formatBookTitle(option.title, option.author);
-            const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
-            const score = scores[optionIndex] ?? 0;
-            return `**${optionIndex + 1}.** ${nomination}${cover} - ${formatScore(score, pollType)}`;
-          })
-          .join("\n");
+      : pollType === "regular"
+        ? buildRegularPollDescription(poll, options, startIndex, scores)
+        : options
+            .map((option, index) => {
+              const optionIndex = startIndex + index;
+              const nomination = formatBookTitle(option.title, option.author);
+              const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
+              const score = scores[optionIndex] ?? 0;
+              return `**${optionIndex + 1}.** ${nomination}${cover} - ${formatScore(score, pollType)}`;
+            })
+            .join("\n");
 
   const statusText = pollType === "ranked" ? `Ranked poll - ${buildRankedStatus(poll)}` : "Regular poll";
   const footerText =

@@ -15,7 +15,7 @@ import { buildPollComponents, buildPollEmbed } from "../polls.js";
 
 export const data = new SlashCommandBuilder()
   .setName("nominate-book")
-  .setDescription("Nominate a book for the next club poll.")
+  .setDescription("Nominate a book for the active club poll.")
   .addStringOption((option) =>
     option.setName("title").setDescription("The title of the book you want to nominate.").setRequired(true),
   )
@@ -123,6 +123,15 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 
   const { nominations, polls } = getBookClubCollections();
+  const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
+  if (!activePoll) {
+    await interaction.reply({
+      content: "There is no active book poll right now. Start one with `/start-book-poll` before nominating books.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   const now = new Date();
   const normalizedTitle = normalizeTitle(title);
   const existingNomination = await nominations.findOne({
@@ -178,10 +187,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     status: "nominated",
   });
 
-  const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
   let pollText = "";
 
-  if (nomination && activePoll) {
+  if (nomination) {
     const pollOption = buildPollOption(nomination);
     const optionIndex = activePoll.options.findIndex(
       (option) => option.nominationId === nomination.nominationId || option.nominatedBy === interaction.user.id,
