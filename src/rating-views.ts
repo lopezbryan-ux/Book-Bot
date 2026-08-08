@@ -8,11 +8,12 @@ import {
 } from "discord.js";
 import { getBookClubCollections } from "./book-club.js";
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "./mongo.js";
+import { getBookLeaderboardSummaries, type BookSummaryRequest } from "./utils/aiUtils/bookSummaryProvider.js";
 
 const RATING_LIST_PREFIX = "rating-list";
 const BOOK_LEADERBOARD_PREFIX = "book-leaderboard";
 const RATINGS_PER_PAGE = 1;
-const LEADERBOARD_BOOKS_PER_PAGE = 10;
+const LEADERBOARD_BOOKS_PER_PAGE = 5;
 
 interface RatingDocument {
   documentType: "rating";
@@ -32,6 +33,8 @@ interface BookLeaderboardEntry {
   bookTitle: string;
   author: string | null;
   averageRating: number;
+  ratingCount: number;
+  reviews: Array<string | null>;
 }
 
 function buildRatingListCustomId(userId: string, page: number) {
@@ -53,6 +56,14 @@ function formatRating(ratingValue: unknown) {
 
 function truncateReview(review: string) {
   return review.length > 220 ? `${review.slice(0, 217)}...` : review;
+}
+
+function truncateEmbedValue(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3).trimEnd()}...` : value;
+}
+
+function truncateEmbedFieldName(value: string) {
+  return truncateEmbedValue(value, 256);
 }
 
 function formatDate(value: Date | string | undefined) {
@@ -237,11 +248,18 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
         },
       },
       {
+        $sort: {
+          updatedAt: -1,
+        },
+      },
+      {
         $group: {
           _id: "$normalizedTitle",
           bookTitle: { $first: "$bookTitle" },
           author: { $first: "$author" },
           averageRating: { $avg: "$rating" },
+          ratingCount: { $sum: 1 },
+          reviews: { $push: "$review" },
         },
       },
       {
@@ -256,6 +274,15 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
       {
         $limit: LEADERBOARD_BOOKS_PER_PAGE,
       },
+      {
+        $project: {
+          bookTitle: 1,
+          author: 1,
+          averageRating: 1,
+          ratingCount: 1,
+          reviews: { $slice: ["$reviews", 5] },
+        },
+      },
     ])
     .toArray();
 
@@ -268,6 +295,23 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
     })
     .toArray();
   const booksByTitle = new Map(bookDocs.map((book) => [book.normalizedTitle, book]));
+  const summaryRequests: BookSummaryRequest[] = leaderboardEntries.map((entry) => {
+    const book = booksByTitle.get(entry._id);
+
+    return {
+      key: entry._id,
+      title: book?.title ?? entry.bookTitle,
+      author: book?.author ?? entry.author ?? null,
+      averageRating: entry.averageRating,
+      ratingCount: entry.ratingCount,
+      reviews: entry.reviews.filter((review): review is string => typeof review === "string" && review.trim().length > 0),
+    };
+  });
+
+  const aiSummaries = await getBookLeaderboardSummaries(summaryRequests).catch((error) => {
+    console.error("Failed to generate book leaderboard summaries:", error);
+    return new Map();
+  });
 
   const embed = new EmbedBuilder()
     .setColor(0x6f8f72)
@@ -280,10 +324,16 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
     const rank = safePage * LEADERBOARD_BOOKS_PER_PAGE + index + 1;
     const title = book?.title ?? entry.bookTitle;
     const author = book?.author ?? entry.author ?? "Unknown author";
+    const aiSummary = aiSummaries.get(entry._id);
+    const ratingCountLabel = `${entry.ratingCount} rating${entry.ratingCount === 1 ? "" : "s"}`;
+    const ratingSummary = aiSummary?.ratingSummary || "No written review summary is available yet.";
 
     embed.addFields({
-      name: `${rank}. ${title}`,
-      value: `Author: ${author}\nAverage Rating: **${entry.averageRating.toFixed(1)}/10**`,
+      name: truncateEmbedFieldName(`${rank}. ${title}`),
+      value: truncateEmbedValue(
+        `Author: ${author}\nAverage Rating: **${entry.averageRating.toFixed(1)}/10** from ${ratingCountLabel}\nRating Summary: ${ratingSummary}`,
+        1024,
+      ),
     });
   }
 
@@ -338,8 +388,10 @@ export async function handleBookLeaderboardPage(interaction: ButtonInteraction) 
     return;
   }
 
+  await interaction.deferUpdate();
+
   const message = await buildBookLeaderboardMessage(interaction.guildId, page);
-  await interaction.update({
+  await interaction.editReply({
     embeds: message.embeds,
     components: message.components,
   });

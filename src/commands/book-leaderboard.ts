@@ -1,4 +1,4 @@
-import { ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
+import { ChatInputCommandInteraction, SlashCommandBuilder } from "discord.js";
 import { buildBookLeaderboardMessage } from "../rating-views.js";
 
 export const data = new SlashCommandBuilder()
@@ -6,17 +6,18 @@ export const data = new SlashCommandBuilder()
   .setDescription("Show the highest rated club books.");
 
 export async function execute(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply();
+
   const message = await buildBookLeaderboardMessage(interaction.guildId, 0);
 
   if (message.totalBooks === 0) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "No books have ratings yet.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  await interaction.reply({
+  await interaction.editReply({
     embeds: message.embeds,
     components: message.components,
   });
