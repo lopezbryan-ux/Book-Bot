@@ -6,14 +6,16 @@ import {
   EmbedBuilder,
   MessageFlags,
 } from "discord.js";
+import { ObjectId } from "mongodb";
 import { getBookClubCollections } from "./book-club.js";
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "./mongo.js";
-import { getBookLeaderboardSummaries, type BookSummaryRequest } from "./utils/aiUtils/bookSummaryProvider.js";
 
 const RATING_LIST_PREFIX = "rating-list";
 const BOOK_LEADERBOARD_PREFIX = "book-leaderboard";
+const BOOK_REVIEWS_PREFIX = "book-reviews";
 const RATINGS_PER_PAGE = 1;
 const LEADERBOARD_BOOKS_PER_PAGE = 5;
+const BOOK_REVIEWS_PER_PAGE = 3;
 
 interface RatingDocument {
   documentType: "rating";
@@ -34,7 +36,6 @@ interface BookLeaderboardEntry {
   author: string | null;
   averageRating: number;
   ratingCount: number;
-  reviews: Array<string | null>;
 }
 
 function buildRatingListCustomId(userId: string, page: number) {
@@ -43,6 +44,10 @@ function buildRatingListCustomId(userId: string, page: number) {
 
 function buildBookLeaderboardCustomId(page: number) {
   return `${BOOK_LEADERBOARD_PREFIX}:${page}`;
+}
+
+function buildBookReviewsCustomId(bookId: string, page: number) {
+  return `${BOOK_REVIEWS_PREFIX}:${bookId}:${page}`;
 }
 
 function formatRating(ratingValue: unknown) {
@@ -85,6 +90,10 @@ export function isRatingListPageCustomId(customId: string) {
 
 export function isBookLeaderboardPageCustomId(customId: string) {
   return customId.startsWith(`${BOOK_LEADERBOARD_PREFIX}:`);
+}
+
+export function isBookReviewsPageCustomId(customId: string) {
+  return customId.startsWith(`${BOOK_REVIEWS_PREFIX}:`);
 }
 
 export async function getBookRatingSummary(guildId: string | null, normalizedTitle: string) {
@@ -259,7 +268,6 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
           author: { $first: "$author" },
           averageRating: { $avg: "$rating" },
           ratingCount: { $sum: 1 },
-          reviews: { $push: "$review" },
         },
       },
       {
@@ -280,7 +288,6 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
           author: 1,
           averageRating: 1,
           ratingCount: 1,
-          reviews: { $slice: ["$reviews", 5] },
         },
       },
     ])
@@ -295,24 +302,6 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
     })
     .toArray();
   const booksByTitle = new Map(bookDocs.map((book) => [book.normalizedTitle, book]));
-  const summaryRequests: BookSummaryRequest[] = leaderboardEntries.map((entry) => {
-    const book = booksByTitle.get(entry._id);
-
-    return {
-      key: entry._id,
-      title: book?.title ?? entry.bookTitle,
-      author: book?.author ?? entry.author ?? null,
-      averageRating: entry.averageRating,
-      ratingCount: entry.ratingCount,
-      reviews: entry.reviews.filter((review): review is string => typeof review === "string" && review.trim().length > 0),
-    };
-  });
-
-  const aiSummaries = await getBookLeaderboardSummaries(summaryRequests).catch((error) => {
-    console.error("Failed to generate book leaderboard summaries:", error);
-    return new Map();
-  });
-
   const embed = new EmbedBuilder()
     .setColor(0x6f8f72)
     .setTitle("Book Rating Leaderboard")
@@ -324,16 +313,11 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
     const rank = safePage * LEADERBOARD_BOOKS_PER_PAGE + index + 1;
     const title = book?.title ?? entry.bookTitle;
     const author = book?.author ?? entry.author ?? "Unknown author";
-    const aiSummary = aiSummaries.get(entry._id);
     const ratingCountLabel = `${entry.ratingCount} rating${entry.ratingCount === 1 ? "" : "s"}`;
     const fieldLines = [
       `Author: ${author}`,
       `Average Rating: **${entry.averageRating.toFixed(1)}/10** from ${ratingCountLabel}`,
     ];
-
-    if (aiSummary?.ratingSummary) {
-      fieldLines.push(`Rating Summary: ${aiSummary.ratingSummary}`);
-    }
 
     embed.addFields({
       name: truncateEmbedFieldName(`${rank}. ${title}`),
@@ -367,6 +351,94 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
   return { embeds: [embed], components, totalBooks };
 }
 
+export async function buildBookReviewsMessage(guildId: string | null, bookId: string, page: number) {
+  if (!ObjectId.isValid(bookId)) {
+    return { embeds: [], components: [], totalReviews: 0, book: null };
+  }
+
+  const { books } = getBookClubCollections();
+  const book = await books.findOne({
+    _id: new ObjectId(bookId),
+    documentType: "book",
+    guildId,
+  });
+
+  if (!book) {
+    return { embeds: [], components: [], totalReviews: 0, book: null };
+  }
+
+  const ratings = mongoClient.db(BOOK_BOT_DB_NAME).collection<RatingDocument>(BOOK_BOT_COLLECTION_NAME);
+  const reviewQuery = {
+    documentType: "rating" as const,
+    guildId,
+    normalizedTitle: book.normalizedTitle,
+    review: { $type: "string" as const, $ne: "" },
+  };
+  const totalReviews = await ratings.countDocuments(reviewQuery);
+  const totalPages = Math.max(1, Math.ceil(totalReviews / BOOK_REVIEWS_PER_PAGE));
+  const safePage = Math.min(Math.max(page, 0), totalPages - 1);
+  const pageReviews = await ratings
+    .find(reviewQuery)
+    .sort({ updatedAt: -1 })
+    .skip(safePage * BOOK_REVIEWS_PER_PAGE)
+    .limit(BOOK_REVIEWS_PER_PAGE)
+    .toArray();
+
+  const ratingSummary = await getBookRatingSummary(guildId, book.normalizedTitle);
+  const ratingSummaryText =
+    ratingSummary.ratingCount > 0
+      ? `Club average: **${ratingSummary.averageRating.toFixed(1)}/10** from ${ratingSummary.ratingCount} rating${
+          ratingSummary.ratingCount === 1 ? "" : "s"
+        }`
+      : "No ratings yet.";
+
+  const embed = new EmbedBuilder()
+    .setColor(0xd9a441)
+    .setTitle(book.title)
+    .setDescription(`${book.author ? `by **${book.author}**\n` : ""}${ratingSummaryText}`)
+    .setFooter({ text: `Review page ${safePage + 1} of ${totalPages}` })
+    .setTimestamp();
+
+  if (book.imageUrl) {
+    embed.setThumbnail(book.imageUrl);
+  }
+
+  for (const review of pageReviews) {
+    const ratingDisplay = formatRating(review.rating);
+    const reviewer = review.username?.trim() || "Unknown reviewer";
+    const reviewText = truncateEmbedValue(review.review ?? "", 900);
+    embed.addFields({
+      name: truncateEmbedFieldName(`${reviewer} - ${ratingDisplay.value}`),
+      value: truncateEmbedValue(`> ${reviewText}\nUpdated ${formatDate(review.updatedAt)}`, 1024),
+    });
+  }
+
+  const components =
+    totalPages > 1
+      ? [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+              .setCustomId(buildBookReviewsCustomId(bookId, safePage - 1))
+              .setLabel("Prev")
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(safePage === 0),
+            new ButtonBuilder()
+              .setCustomId(buildBookReviewsCustomId(bookId, safePage))
+              .setLabel(`${safePage + 1}/${totalPages}`)
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(true),
+            new ButtonBuilder()
+              .setCustomId(buildBookReviewsCustomId(bookId, safePage + 1))
+              .setLabel("Next")
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(safePage >= totalPages - 1),
+          ),
+        ]
+      : [];
+
+  return { embeds: [embed], components, totalReviews, book };
+}
+
 export async function handleRatingListPage(interaction: ButtonInteraction) {
   const [, userId, pageText] = interaction.customId.split(":");
   const page = Number(pageText);
@@ -395,6 +467,33 @@ export async function handleBookLeaderboardPage(interaction: ButtonInteraction) 
   await interaction.deferUpdate();
 
   const message = await buildBookLeaderboardMessage(interaction.guildId, page);
+  await interaction.editReply({
+    embeds: message.embeds,
+    components: message.components,
+  });
+}
+
+export async function handleBookReviewsPage(interaction: ButtonInteraction) {
+  const [, bookId, pageText] = interaction.customId.split(":");
+  const page = Number(pageText);
+
+  if (!bookId || !Number.isInteger(page)) {
+    await interaction.reply({ content: "That review page button is invalid.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const message = await buildBookReviewsMessage(interaction.guildId, bookId, page);
+  if (!message.book) {
+    await interaction.editReply({
+      content: "That book could not be found anymore.",
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
   await interaction.editReply({
     embeds: message.embeds,
     components: message.components,

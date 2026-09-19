@@ -25,8 +25,10 @@ import {
 } from './polls.js';
 import {
   handleBookLeaderboardPage,
+  handleBookReviewsPage,
   handleRatingListPage,
   isBookLeaderboardPageCustomId,
+  isBookReviewsPageCustomId,
   isRatingListPageCustomId,
 } from './rating-views.js';
 import { handleHelpPage, isHelpPageCustomId } from './help.js';
@@ -189,6 +191,11 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 
       if (interaction.isButton() && isBookLeaderboardPageCustomId(interaction.customId)) {
         await handleBookLeaderboardPage(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && isBookReviewsPageCustomId(interaction.customId)) {
+        await handleBookReviewsPage(interaction);
         return;
       }
 
