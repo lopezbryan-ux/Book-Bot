@@ -5,19 +5,19 @@ import { buildPollComponents, buildPollEmbed } from "../polls.js";
 
 export const data = new SlashCommandBuilder()
   .setName("start-book-poll")
-  .setDescription("Start a poll using the current book nominations.")
+  .setDescription("Open voting for the book club's next read.")
   .addNumberOption((option) =>
     option
       .setName("hours")
-      .setDescription("How many hours the poll should stay open.")
+      .setDescription("How long should voting stay open?")
       .setRequired(true)
       .setMinValue(1),
   )
   .addStringOption((option) =>
     option
       .setName("type")
-      .setDescription("Choose how votes are counted.")
-      .addChoices({ name: "Regular", value: "regular" }, { name: "Ranked", value: "ranked" }),
+      .setDescription("Choose one book or rank a top three. Defaults to one book.")
+      .addChoices({ name: "Choose one book", value: "regular" }, { name: "Rank a top three", value: "ranked" }),
   );
 
 export async function execute(interaction: ChatInputCommandInteraction) {

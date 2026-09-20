@@ -2,7 +2,7 @@ import { AutocompleteInteraction, ChatInputCommandInteraction, MessageFlags, Sla
 import { buildRatingRemovedEmbed } from "../book-embeds.js";
 import { formatBookTitle, getBookClubCollections, normalizeTitle } from "../book-club.js";
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "../mongo.js";
-import { invalidateBookLeaderboardCache } from "../rating-views.js";
+import { invalidateRatingViewsCache } from "../rating-views.js";
 
 export const data = new SlashCommandBuilder()
   .setName("remove-rating")
@@ -83,7 +83,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  invalidateBookLeaderboardCache(interaction.guildId);
+  invalidateRatingViewsCache(interaction.guildId);
 
   await interaction.reply({
     embeds: [

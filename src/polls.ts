@@ -19,6 +19,8 @@ const RANK_WEIGHTS = [3, 2, 1] as const;
 const POLL_OPTIONS_PER_PAGE = 20;
 const REGULAR_POLL_BAR_SEGMENTS = 12;
 const MAX_VISIBLE_VOTERS_PER_OPTION = 4;
+const ACTIVE_POLL_COLOR = 0x5865f2;
+const CLOSED_POLL_COLOR = 0x747f8d;
 
 type PollComponentRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>;
 type PollComponentPoll = Pick<PollDocument, "options" | "pollId" | "pollType" | "votes">;
@@ -174,9 +176,9 @@ function buildRegularPollDescription(
       const voters = votersByOption[optionIndex] ?? [];
 
       return [
-        `**${optionIndex + 1}.** ${nomination}${cover}`,
+        `**${optionIndex + 1}  ·  ${nomination}**${cover}`,
         `\`${buildRegularPollBar(score, totalVotes)}\` ${formatScore(score, "regular")} - ${percentage}%`,
-        `Voters: ${formatRegularPollVoters(voters)}`,
+        `↳ ${formatRegularPollVoters(voters)}`,
       ].join("\n");
     })
     .join("\n\n");
@@ -242,8 +244,8 @@ function buildRankedPollDescription(
       const voters = votersByOption[optionIndex] ?? [];
 
       return [
-        `**${optionIndex + 1}.** ${nomination}${cover} - ${formatScore(score, "ranked")}`,
-        `Voters: ${formatRankedPollVoters(voters)}`,
+        `**${optionIndex + 1}  ·  ${nomination}**${cover}`,
+        `⭐ ${formatScore(score, "ranked")}  ·  ${formatRankedPollVoters(voters)}`,
       ].join("\n");
     })
     .join("\n\n");
@@ -259,29 +261,56 @@ function formatPollCloseTime(closesAt?: Date | string | null) {
   return `<t:${unixTimestamp}:f> (<t:${unixTimestamp}:R>)`;
 }
 
+function buildPollInstructions(pollType: PollType, isActive: boolean) {
+  if (!isActive) return "Voting has ended. Here are the final results.";
+
+  return pollType === "ranked"
+    ? "Rank your **top three books**. First place earns 3 points, second earns 2, and third earns 1."
+    : "Choose **one book** using its numbered button below. You can change your vote any time before the poll closes.";
+}
+
+function buildParticipationText(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
+  if (getPollType(poll) === "ranked") return buildRankedStatus(poll);
+
+  const voteCount = Object.values(poll.votes ?? {}).filter(
+    (vote) => typeof vote === "number" && Number.isInteger(vote) && vote >= 0 && vote < poll.options.length,
+  ).length;
+  return `${voteCount} vote${voteCount === 1 ? "" : "s"} cast`;
+}
+
 export function buildPollEmbed(
-  poll: Pick<PollDocument, "closesAt" | "options" | "pollId" | "pollType" | "votes" | "status">,
+  poll: Pick<PollDocument, "closedAt" | "closesAt" | "options" | "pollId" | "pollType" | "votes" | "status">,
   page = 0,
 ) {
   const pollType = getPollType(poll);
   const scores = getPollScores(poll);
   const totalPages = getPollTotalPages(poll);
   const { safePage, startIndex, options } = getPollPageOptions(poll, page);
-  const description =
+  const isActive = poll.status === "active";
+  const results =
     poll.options.length === 0
-      ? "No books have been nominated yet. Use `/nominate-book` to add books to this poll."
+      ? "*No books have been nominated yet. Use `/nominate-book` to add the first one.*"
       : pollType === "regular"
         ? buildRegularPollDescription(poll, options, startIndex, scores)
         : buildRankedPollDescription(poll, options, startIndex, scores);
-
-  const statusText = pollType === "ranked" ? `Ranked poll - ${buildRankedStatus(poll)}` : "Regular poll";
+  const description = `${buildPollInstructions(pollType, isActive)}\n\n${results}`;
+  const votingStyle = pollType === "ranked" ? "Rank your top 3 · 3–2–1 points" : "Pick one book";
   const footerText =
-    totalPages > 1 ? `Poll ID: ${poll.pollId} - Page ${safePage + 1} of ${totalPages}` : `Poll ID: ${poll.pollId}`;
+    totalPages > 1 ? `Poll ID · ${poll.pollId}  •  Page ${safePage + 1} of ${totalPages}` : `Poll ID · ${poll.pollId}`;
 
   return new EmbedBuilder()
-    .setTitle(poll.status === "active" ? "Book Club Poll" : "Closed Book Club Poll")
+    .setColor(isActive ? ACTIVE_POLL_COLOR : CLOSED_POLL_COLOR)
+    .setTitle(isActive ? "📚  Vote for Our Next Book" : "📕  Book Poll Closed")
     .setDescription(description)
-    .addFields({ name: "Type", value: statusText }, { name: "Closes", value: formatPollCloseTime(poll.closesAt) })
+    .addFields(
+      { name: "🗳️  Voting style", value: votingStyle, inline: true },
+      {
+        name: isActive ? "⏳  Poll closes" : "✅  Poll closed",
+        value: formatPollCloseTime(isActive ? poll.closesAt : (poll.closedAt ?? poll.closesAt)),
+        inline: true,
+      },
+      { name: "👥  Participation", value: buildParticipationText(poll), inline: true },
+    )
     .setFooter({ text: footerText });
 }
 
@@ -309,7 +338,7 @@ function buildRegularPollComponents(poll: Pick<PollDocument, "options" | "pollId
       row.addComponents(
         new ButtonBuilder()
           .setCustomId(buildPollCustomId(poll.pollId, optionIndex, safePage))
-          .setLabel(`${optionIndex + 1}`)
+          .setLabel(`Vote ${optionIndex + 1}`)
           .setStyle(ButtonStyle.Primary)
           .setDisabled(disabled),
       );
@@ -334,7 +363,8 @@ function buildRankedPollOpenComponents(poll: Pick<PollDocument, "options" | "pol
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(buildPollRankOpenCustomId(poll.pollId, safePage))
-        .setLabel("Rank books")
+        .setLabel("Rank my top 3")
+        .setEmoji("🏆")
         .setStyle(ButtonStyle.Primary)
         .setDisabled(disabled),
     ),
@@ -392,17 +422,19 @@ function buildPollPageRow(pollId: string, safePage: number, totalPages: number) 
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(buildPollPageCustomId(pollId, safePage - 1))
-      .setLabel("Prev")
+      .setLabel("Previous")
+      .setEmoji("◀️")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(safePage === 0),
     new ButtonBuilder()
       .setCustomId(buildPollPageCustomId(pollId, safePage))
-      .setLabel(`${safePage + 1}/${totalPages}`)
+      .setLabel(`Page ${safePage + 1} of ${totalPages}`)
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(true),
     new ButtonBuilder()
       .setCustomId(buildPollPageCustomId(pollId, safePage + 1))
       .setLabel("Next")
+      .setEmoji("▶️")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(safePage >= totalPages - 1),
   );

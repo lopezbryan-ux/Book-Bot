@@ -13,6 +13,7 @@ import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "./mongo
 const RATING_LIST_PREFIX = "rating-list";
 const BOOK_LEADERBOARD_PREFIX = "book-leaderboard";
 const BOOK_REVIEWS_PREFIX = "book-reviews";
+const BOOK_REVIEWS_BOOK_PREFIX = "book-reviews-book";
 const RATINGS_PER_PAGE = 1;
 const LEADERBOARD_BOOKS_PER_PAGE = 5;
 const BOOK_REVIEWS_PER_PAGE = 3;
@@ -49,6 +50,16 @@ interface CachedBookLeaderboard {
   entriesPromise: Promise<BookLeaderboardDisplayEntry[]>;
 }
 
+interface ReviewedBookEntry {
+  bookId: string;
+  normalizedTitle: string;
+}
+
+interface CachedReviewedBooks {
+  expiresAt: number;
+  booksPromise: Promise<ReviewedBookEntry[]>;
+}
+
 export type BookLeaderboardRanking = "highest-rated" | "most-rated" | "most-divisive";
 
 const BOOK_LEADERBOARD_CACHE_TTL_MS = 60_000;
@@ -56,6 +67,7 @@ const bookLeaderboardCache = new Map<
   string | null,
   Map<BookLeaderboardRanking, CachedBookLeaderboard>
 >();
+const reviewedBooksCache = new Map<string | null, CachedReviewedBooks>();
 
 const bookLeaderboardRankings: Record<
   BookLeaderboardRanking,
@@ -92,6 +104,10 @@ function buildBookLeaderboardCustomId(ranking: BookLeaderboardRanking, page: num
 
 function buildBookReviewsCustomId(bookId: string, page: number) {
   return `${BOOK_REVIEWS_PREFIX}:${bookId}:${page}`;
+}
+
+function buildBookReviewsBookCustomId(bookId: string) {
+  return `${BOOK_REVIEWS_BOOK_PREFIX}:${bookId}`;
 }
 
 function formatRating(ratingValue: unknown) {
@@ -140,12 +156,17 @@ export function isBookLeaderboardRanking(value: string): value is BookLeaderboar
   return value in bookLeaderboardRankings;
 }
 
-export function invalidateBookLeaderboardCache(guildId: string | null) {
+export function invalidateRatingViewsCache(guildId: string | null) {
   bookLeaderboardCache.delete(guildId);
+  reviewedBooksCache.delete(guildId);
 }
 
 export function isBookReviewsPageCustomId(customId: string) {
   return customId.startsWith(`${BOOK_REVIEWS_PREFIX}:`);
+}
+
+export function isBookReviewsBookCustomId(customId: string) {
+  return customId.startsWith(`${BOOK_REVIEWS_BOOK_PREFIX}:`);
 }
 
 export async function getBookRatingSummary(guildId: string | null, normalizedTitle: string) {
@@ -454,6 +475,65 @@ export async function buildBookLeaderboardMessage(
   return { embeds: [embed], components, totalBooks };
 }
 
+async function loadReviewedBooks(guildId: string | null): Promise<ReviewedBookEntry[]> {
+  const ratings = mongoClient.db(BOOK_BOT_DB_NAME).collection<RatingDocument>(BOOK_BOT_COLLECTION_NAME);
+  const reviewedTitles = await ratings.distinct("normalizedTitle", {
+    documentType: "rating",
+    guildId,
+  });
+
+  if (reviewedTitles.length === 0) {
+    return [];
+  }
+
+  const { books } = getBookClubCollections();
+  const reviewedBooks = await books
+    .find(
+      {
+        documentType: "book",
+        guildId,
+        normalizedTitle: { $in: reviewedTitles },
+      },
+      {
+        projection: {
+          normalizedTitle: 1,
+        },
+      },
+    )
+    .sort({ selectedAt: 1, _id: 1 })
+    .toArray();
+
+  return reviewedBooks.map((reviewedBook) => ({
+    bookId: reviewedBook._id.toString(),
+    normalizedTitle: reviewedBook.normalizedTitle,
+  }));
+}
+
+async function getReviewedBooks(guildId: string | null) {
+  const now = Date.now();
+  const cachedBooks = reviewedBooksCache.get(guildId);
+
+  if (cachedBooks && cachedBooks.expiresAt > now) {
+    return cachedBooks.booksPromise;
+  }
+
+  const booksPromise = loadReviewedBooks(guildId);
+  const cacheEntry: CachedReviewedBooks = {
+    expiresAt: now + BOOK_LEADERBOARD_CACHE_TTL_MS,
+    booksPromise,
+  };
+  reviewedBooksCache.set(guildId, cacheEntry);
+
+  try {
+    return await booksPromise;
+  } catch (error) {
+    if (reviewedBooksCache.get(guildId) === cacheEntry) {
+      reviewedBooksCache.delete(guildId);
+    }
+    throw error;
+  }
+}
+
 export async function buildBookReviewsMessage(guildId: string | null, bookId: string, page: number) {
   if (!ObjectId.isValid(bookId)) {
     return { embeds: [], components: [], totalRatings: 0, book: null };
@@ -479,14 +559,19 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
   const totalRatings = await ratings.countDocuments(ratingsQuery);
   const totalPages = Math.max(1, Math.ceil(totalRatings / BOOK_REVIEWS_PER_PAGE));
   const safePage = Math.min(Math.max(page, 0), totalPages - 1);
-  const pageRatings = await ratings
-    .find(ratingsQuery)
-    .sort({ updatedAt: -1 })
-    .skip(safePage * BOOK_REVIEWS_PER_PAGE)
-    .limit(BOOK_REVIEWS_PER_PAGE)
-    .toArray();
-
-  const ratingSummary = await getBookRatingSummary(guildId, book.normalizedTitle);
+  const [pageRatings, ratingSummary, reviewedBooks] = await Promise.all([
+    ratings
+      .find(ratingsQuery)
+      .sort({ updatedAt: -1 })
+      .skip(safePage * BOOK_REVIEWS_PER_PAGE)
+      .limit(BOOK_REVIEWS_PER_PAGE)
+      .toArray(),
+    getBookRatingSummary(guildId, book.normalizedTitle),
+    getReviewedBooks(guildId),
+  ]);
+  const currentBookIndex = reviewedBooks.findIndex((reviewedBook) => reviewedBook.bookId === bookId);
+  const previousBook = currentBookIndex > 0 ? reviewedBooks[currentBookIndex - 1] : null;
+  const nextBook = currentBookIndex >= 0 ? reviewedBooks[currentBookIndex + 1] ?? null : null;
   const ratingSummaryText =
     ratingSummary.ratingCount > 0
       ? `Club average: **${ratingSummary.averageRating.toFixed(1)}/10** from ${ratingSummary.ratingCount} rating${
@@ -498,7 +583,12 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
     .setColor(0xd9a441)
     .setTitle(book.title)
     .setDescription(`${book.author ? `by **${book.author}**\n` : ""}${ratingSummaryText}`)
-    .setFooter({ text: `Ratings and reviews page ${safePage + 1} of ${totalPages}` })
+    .setFooter({
+      text:
+        currentBookIndex >= 0
+          ? `Book ${currentBookIndex + 1} of ${reviewedBooks.length} • Reviews page ${safePage + 1} of ${totalPages}`
+          : `Ratings and reviews page ${safePage + 1} of ${totalPages}`,
+    })
     .setTimestamp();
 
   if (book.imageUrl) {
@@ -518,13 +608,13 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
     });
   }
 
-  const components =
+  const reviewPageComponents =
     totalPages > 1
       ? [
           new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
               .setCustomId(buildBookReviewsCustomId(bookId, safePage - 1))
-              .setLabel("Prev")
+              .setLabel("Prev Reviews")
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(safePage === 0),
             new ButtonBuilder()
@@ -534,14 +624,42 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
               .setDisabled(true),
             new ButtonBuilder()
               .setCustomId(buildBookReviewsCustomId(bookId, safePage + 1))
-              .setLabel("Next")
+              .setLabel("Next Reviews")
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(safePage >= totalPages - 1),
           ),
         ]
       : [];
 
-  return { embeds: [embed], components, totalRatings, book };
+  const bookNavigationComponents =
+    reviewedBooks.length > 1 && currentBookIndex >= 0
+      ? [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+              .setCustomId(buildBookReviewsBookCustomId(previousBook?.bookId ?? bookId))
+              .setLabel("Previous Book")
+              .setStyle(ButtonStyle.Primary)
+              .setDisabled(!previousBook),
+            new ButtonBuilder()
+              .setCustomId(buildBookReviewsBookCustomId(bookId))
+              .setLabel(`${currentBookIndex + 1}/${reviewedBooks.length} Books`)
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(true),
+            new ButtonBuilder()
+              .setCustomId(buildBookReviewsBookCustomId(nextBook?.bookId ?? bookId))
+              .setLabel("Next Book")
+              .setStyle(ButtonStyle.Primary)
+              .setDisabled(!nextBook),
+          ),
+        ]
+      : [];
+
+  return {
+    embeds: [embed],
+    components: [...reviewPageComponents, ...bookNavigationComponents],
+    totalRatings,
+    book,
+  };
 }
 
 export async function handleRatingListPage(interaction: ButtonInteraction) {
@@ -602,6 +720,33 @@ export async function handleBookReviewsPage(interaction: ButtonInteraction) {
   }
 
   await interaction.editReply({
+    embeds: message.embeds,
+    components: message.components,
+  });
+}
+
+export async function handleBookReviewsBook(interaction: ButtonInteraction) {
+  const [, bookId] = interaction.customId.split(":");
+
+  if (!bookId || !ObjectId.isValid(bookId)) {
+    await interaction.reply({ content: "That book navigation button is invalid.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  const message = await buildBookReviewsMessage(interaction.guildId, bookId, 0);
+  if (!message.book || message.totalRatings === 0) {
+    await interaction.editReply({
+      content: "That book does not have ratings and reviews anymore.",
+      embeds: [],
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.editReply({
+    content: null,
     embeds: message.embeds,
     components: message.components,
   });
