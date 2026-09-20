@@ -32,6 +32,7 @@ import {
   isRatingListPageCustomId,
 } from './rating-views.js';
 import { handleHelpPage, isHelpPageCustomId } from './help.js';
+import { handleBookListSort, isBookListSortCustomId } from './book-list-view.js';
 // Create a new client instance
 interface Command {
   data: { name: string };
@@ -196,6 +197,11 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 
       if (interaction.isButton() && isBookReviewsPageCustomId(interaction.customId)) {
         await handleBookReviewsPage(interaction);
+        return;
+      }
+
+      if (interaction.isStringSelectMenu() && isBookListSortCustomId(interaction.customId)) {
+        await handleBookListSort(interaction);
         return;
       }
 
