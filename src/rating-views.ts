@@ -39,7 +39,23 @@ interface BookLeaderboardEntry {
   ratingSpread: number;
 }
 
+interface BookLeaderboardDisplayEntry extends BookLeaderboardEntry {
+  title: string;
+  displayAuthor: string;
+}
+
+interface CachedBookLeaderboard {
+  expiresAt: number;
+  entriesPromise: Promise<BookLeaderboardDisplayEntry[]>;
+}
+
 export type BookLeaderboardRanking = "highest-rated" | "most-rated" | "most-divisive";
+
+const BOOK_LEADERBOARD_CACHE_TTL_MS = 60_000;
+const bookLeaderboardCache = new Map<
+  string | null,
+  Map<BookLeaderboardRanking, CachedBookLeaderboard>
+>();
 
 const bookLeaderboardRankings: Record<
   BookLeaderboardRanking,
@@ -122,6 +138,10 @@ export function isBookLeaderboardPageCustomId(customId: string) {
 
 export function isBookLeaderboardRanking(value: string): value is BookLeaderboardRanking {
   return value in bookLeaderboardRankings;
+}
+
+export function invalidateBookLeaderboardCache(guildId: string | null) {
+  bookLeaderboardCache.delete(guildId);
 }
 
 export function isBookReviewsPageCustomId(customId: string) {
@@ -271,37 +291,13 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
   return { embeds: [embed], components, totalRatings };
 }
 
-export async function buildBookLeaderboardMessage(
+async function loadBookLeaderboardEntries(
   guildId: string | null,
-  page: number,
-  ranking: BookLeaderboardRanking = "highest-rated",
-) {
+  ranking: BookLeaderboardRanking,
+): Promise<BookLeaderboardDisplayEntry[]> {
   const ratings = mongoClient.db(BOOK_BOT_DB_NAME).collection<RatingDocument>(BOOK_BOT_COLLECTION_NAME);
   const rankingOption = bookLeaderboardRankings[ranking];
   const minimumRatingStages = ranking === "most-divisive" ? [{ $match: { ratingCount: { $gte: 2 } } }] : [];
-  const totalResults = await ratings
-    .aggregate<{ totalBooks: number }>([
-      {
-        $match: {
-          documentType: "rating",
-          guildId,
-        },
-      },
-      {
-        $group: {
-          _id: "$normalizedTitle",
-          ratingCount: { $sum: 1 },
-        },
-      },
-      ...minimumRatingStages,
-      {
-        $count: "totalBooks",
-      },
-    ])
-    .toArray();
-  const totalBooks = totalResults[0]?.totalBooks ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalBooks / LEADERBOARD_BOOKS_PER_PAGE));
-  const safePage = Math.min(Math.max(page, 0), totalPages - 1);
   const leaderboardEntries = await ratings
     .aggregate<BookLeaderboardEntry>([
       {
@@ -330,12 +326,6 @@ export async function buildBookLeaderboardMessage(
         $sort: rankingOption.sort,
       },
       {
-        $skip: safePage * LEADERBOARD_BOOKS_PER_PAGE,
-      },
-      {
-        $limit: LEADERBOARD_BOOKS_PER_PAGE,
-      },
-      {
         $project: {
           bookTitle: 1,
           author: 1,
@@ -356,6 +346,62 @@ export async function buildBookLeaderboardMessage(
     })
     .toArray();
   const booksByTitle = new Map(bookDocs.map((book) => [book.normalizedTitle, book]));
+
+  return leaderboardEntries.map((entry) => {
+    const book = booksByTitle.get(entry._id);
+    return {
+      ...entry,
+      title: book?.title ?? entry.bookTitle,
+      displayAuthor: book?.author ?? entry.author ?? "Unknown author",
+    };
+  });
+}
+
+async function getBookLeaderboardEntries(guildId: string | null, ranking: BookLeaderboardRanking) {
+  const now = Date.now();
+  let guildCache = bookLeaderboardCache.get(guildId);
+  const cachedLeaderboard = guildCache?.get(ranking);
+
+  if (cachedLeaderboard && cachedLeaderboard.expiresAt > now) {
+    return cachedLeaderboard.entriesPromise;
+  }
+
+  if (!guildCache) {
+    guildCache = new Map();
+    bookLeaderboardCache.set(guildId, guildCache);
+  }
+
+  const entriesPromise = loadBookLeaderboardEntries(guildId, ranking);
+  const cacheEntry: CachedBookLeaderboard = {
+    expiresAt: now + BOOK_LEADERBOARD_CACHE_TTL_MS,
+    entriesPromise,
+  };
+  guildCache.set(ranking, cacheEntry);
+
+  try {
+    return await entriesPromise;
+  } catch (error) {
+    if (guildCache.get(ranking) === cacheEntry) {
+      guildCache.delete(ranking);
+    }
+    throw error;
+  }
+}
+
+export async function buildBookLeaderboardMessage(
+  guildId: string | null,
+  page: number,
+  ranking: BookLeaderboardRanking = "highest-rated",
+) {
+  const rankingOption = bookLeaderboardRankings[ranking];
+  const allLeaderboardEntries = await getBookLeaderboardEntries(guildId, ranking);
+  const totalBooks = allLeaderboardEntries.length;
+  const totalPages = Math.max(1, Math.ceil(totalBooks / LEADERBOARD_BOOKS_PER_PAGE));
+  const safePage = Math.min(Math.max(page, 0), totalPages - 1);
+  const leaderboardEntries = allLeaderboardEntries.slice(
+    safePage * LEADERBOARD_BOOKS_PER_PAGE,
+    (safePage + 1) * LEADERBOARD_BOOKS_PER_PAGE,
+  );
   const embed = new EmbedBuilder()
     .setColor(0x6f8f72)
     .setTitle(rankingOption.title)
@@ -364,23 +410,20 @@ export async function buildBookLeaderboardMessage(
     .setTimestamp();
 
   for (const [index, entry] of leaderboardEntries.entries()) {
-    const book = booksByTitle.get(entry._id);
     const rank = safePage * LEADERBOARD_BOOKS_PER_PAGE + index + 1;
-    const title = book?.title ?? entry.bookTitle;
-    const author = book?.author ?? entry.author ?? "Unknown author";
     const ratingCountLabel = `${entry.ratingCount} rating${entry.ratingCount === 1 ? "" : "s"}`;
     const ratingSummary = `Average Rating: **${entry.averageRating.toFixed(1)}/10** from ${ratingCountLabel}`;
     const fieldLines =
       ranking === "most-divisive"
         ? [
-            `Author: ${author}`,
+            `Author: ${entry.displayAuthor}`,
             `Rating Spread: **${entry.ratingSpread.toFixed(2)}** standard deviation`,
             ratingSummary,
           ]
-        : [`Author: ${author}`, ratingSummary];
+        : [`Author: ${entry.displayAuthor}`, ratingSummary];
 
     embed.addFields({
-      name: truncateEmbedFieldName(`${rank}. ${title}`),
+      name: truncateEmbedFieldName(`${rank}. ${entry.title}`),
       value: truncateEmbedValue(fieldLines.join("\n"), 1024),
     });
   }

@@ -1,6 +1,7 @@
 import { Client, EmbedBuilder } from "discord.js";
 import { formatBookTitle, getBookClubCollections, PollDocument, RankedPollVote } from "./book-club.js";
 import { buildPollComponents, buildPollEmbed, getWinningOptions } from "./polls.js";
+import { invalidateBookLeaderboardCache } from "./rating-views.js";
 
 interface CloseActiveBookPollsOptions {
   client: Client;
@@ -236,6 +237,7 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
         },
         { upsert: true },
       );
+      invalidateBookLeaderboardCache(poll.guildId);
 
       await nominations.updateOne(
         { nominationId: winner.nominationId, guildId: poll.guildId },

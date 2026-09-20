@@ -1,6 +1,7 @@
 import { ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
 import { buildBookAddedEmbed } from "../book-embeds.js";
 import { getBookClubCollections, getImageUrlOrNull, normalizeTitle } from "../book-club.js";
+import { invalidateBookLeaderboardCache } from "../rating-views.js";
 
 export const data = new SlashCommandBuilder()
   .setName("add-book")
@@ -65,6 +66,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     },
     { upsert: true },
   );
+  invalidateBookLeaderboardCache(interaction.guildId);
 
   const action = result.upsertedCount > 0 ? "Added" : "Updated";
   await interaction.reply({

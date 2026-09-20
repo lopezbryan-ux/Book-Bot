@@ -1,6 +1,7 @@
 import { AutocompleteInteraction, ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
 import { formatBookTitle, getBookClubCollections, normalizeTitle } from "../book-club.js";
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "../mongo.js";
+import { invalidateBookLeaderboardCache } from "../rating-views.js";
 
 export const data = new SlashCommandBuilder()
   .setName("delete-book")
@@ -87,6 +88,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     guildId: interaction.guildId,
     normalizedTitle: book.normalizedTitle,
   });
+  invalidateBookLeaderboardCache(interaction.guildId);
 
   await interaction.reply(`Deleted **${formatBookTitle(book.title, book.author)}** from the club book list.`);
 }
