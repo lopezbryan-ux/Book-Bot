@@ -36,14 +36,42 @@ interface BookLeaderboardEntry {
   author: string | null;
   averageRating: number;
   ratingCount: number;
+  ratingSpread: number;
 }
+
+export type BookLeaderboardRanking = "highest-rated" | "most-rated" | "most-divisive";
+
+const bookLeaderboardRankings: Record<
+  BookLeaderboardRanking,
+  {
+    title: string;
+    description: string;
+    sort: Record<string, 1 | -1>;
+  }
+> = {
+  "highest-rated": {
+    title: "Highest Rated Books",
+    description: "Ranked by the club's average rating.",
+    sort: { averageRating: -1, ratingCount: -1, bookTitle: 1 },
+  },
+  "most-rated": {
+    title: "Most Rated Books",
+    description: "Ranked by how many club members submitted a rating.",
+    sort: { ratingCount: -1, averageRating: -1, bookTitle: 1 },
+  },
+  "most-divisive": {
+    title: "Most Divisive Books",
+    description: "Ranked by rating spread. Books need at least two ratings.",
+    sort: { ratingSpread: -1, ratingCount: -1, bookTitle: 1 },
+  },
+};
 
 function buildRatingListCustomId(userId: string, page: number) {
   return `${RATING_LIST_PREFIX}:${userId}:${page}`;
 }
 
-function buildBookLeaderboardCustomId(page: number) {
-  return `${BOOK_LEADERBOARD_PREFIX}:${page}`;
+function buildBookLeaderboardCustomId(ranking: BookLeaderboardRanking, page: number) {
+  return `${BOOK_LEADERBOARD_PREFIX}:${ranking}:${page}`;
 }
 
 function buildBookReviewsCustomId(bookId: string, page: number) {
@@ -90,6 +118,10 @@ export function isRatingListPageCustomId(customId: string) {
 
 export function isBookLeaderboardPageCustomId(customId: string) {
   return customId.startsWith(`${BOOK_LEADERBOARD_PREFIX}:`);
+}
+
+export function isBookLeaderboardRanking(value: string): value is BookLeaderboardRanking {
+  return value in bookLeaderboardRankings;
 }
 
 export function isBookReviewsPageCustomId(customId: string) {
@@ -239,13 +271,35 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
   return { embeds: [embed], components, totalRatings };
 }
 
-export async function buildBookLeaderboardMessage(guildId: string | null, page: number) {
+export async function buildBookLeaderboardMessage(
+  guildId: string | null,
+  page: number,
+  ranking: BookLeaderboardRanking = "highest-rated",
+) {
   const ratings = mongoClient.db(BOOK_BOT_DB_NAME).collection<RatingDocument>(BOOK_BOT_COLLECTION_NAME);
-  const ratedTitles = await ratings.distinct("normalizedTitle", {
-    documentType: "rating",
-    guildId,
-  });
-  const totalBooks = ratedTitles.length;
+  const rankingOption = bookLeaderboardRankings[ranking];
+  const minimumRatingStages = ranking === "most-divisive" ? [{ $match: { ratingCount: { $gte: 2 } } }] : [];
+  const totalResults = await ratings
+    .aggregate<{ totalBooks: number }>([
+      {
+        $match: {
+          documentType: "rating",
+          guildId,
+        },
+      },
+      {
+        $group: {
+          _id: "$normalizedTitle",
+          ratingCount: { $sum: 1 },
+        },
+      },
+      ...minimumRatingStages,
+      {
+        $count: "totalBooks",
+      },
+    ])
+    .toArray();
+  const totalBooks = totalResults[0]?.totalBooks ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalBooks / LEADERBOARD_BOOKS_PER_PAGE));
   const safePage = Math.min(Math.max(page, 0), totalPages - 1);
   const leaderboardEntries = await ratings
@@ -268,13 +322,12 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
           author: { $first: "$author" },
           averageRating: { $avg: "$rating" },
           ratingCount: { $sum: 1 },
+          ratingSpread: { $stdDevPop: "$rating" },
         },
       },
+      ...minimumRatingStages,
       {
-        $sort: {
-          averageRating: -1,
-          bookTitle: 1,
-        },
+        $sort: rankingOption.sort,
       },
       {
         $skip: safePage * LEADERBOARD_BOOKS_PER_PAGE,
@@ -288,6 +341,7 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
           author: 1,
           averageRating: 1,
           ratingCount: 1,
+          ratingSpread: 1,
         },
       },
     ])
@@ -304,7 +358,8 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
   const booksByTitle = new Map(bookDocs.map((book) => [book.normalizedTitle, book]));
   const embed = new EmbedBuilder()
     .setColor(0x6f8f72)
-    .setTitle("Book Rating Leaderboard")
+    .setTitle(rankingOption.title)
+    .setDescription(rankingOption.description)
     .setFooter({ text: `Page ${safePage + 1} of ${totalPages}` })
     .setTimestamp();
 
@@ -314,10 +369,15 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
     const title = book?.title ?? entry.bookTitle;
     const author = book?.author ?? entry.author ?? "Unknown author";
     const ratingCountLabel = `${entry.ratingCount} rating${entry.ratingCount === 1 ? "" : "s"}`;
-    const fieldLines = [
-      `Author: ${author}`,
-      `Average Rating: **${entry.averageRating.toFixed(1)}/10** from ${ratingCountLabel}`,
-    ];
+    const ratingSummary = `Average Rating: **${entry.averageRating.toFixed(1)}/10** from ${ratingCountLabel}`;
+    const fieldLines =
+      ranking === "most-divisive"
+        ? [
+            `Author: ${author}`,
+            `Rating Spread: **${entry.ratingSpread.toFixed(2)}** standard deviation`,
+            ratingSummary,
+          ]
+        : [`Author: ${author}`, ratingSummary];
 
     embed.addFields({
       name: truncateEmbedFieldName(`${rank}. ${title}`),
@@ -330,17 +390,17 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
       ? [
           new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
-              .setCustomId(buildBookLeaderboardCustomId(safePage - 1))
+              .setCustomId(buildBookLeaderboardCustomId(ranking, safePage - 1))
               .setLabel("Prev")
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(safePage === 0),
             new ButtonBuilder()
-              .setCustomId(buildBookLeaderboardCustomId(safePage))
+              .setCustomId(buildBookLeaderboardCustomId(ranking, safePage))
               .setLabel(`${safePage + 1}/${totalPages}`)
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(true),
             new ButtonBuilder()
-              .setCustomId(buildBookLeaderboardCustomId(safePage + 1))
+              .setCustomId(buildBookLeaderboardCustomId(ranking, safePage + 1))
               .setLabel("Next")
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(safePage >= totalPages - 1),
@@ -458,7 +518,9 @@ export async function handleRatingListPage(interaction: ButtonInteraction) {
 }
 
 export async function handleBookLeaderboardPage(interaction: ButtonInteraction) {
-  const [, pageText] = interaction.customId.split(":");
+  const [, rankingOrPage, currentPage] = interaction.customId.split(":");
+  const ranking = rankingOrPage && isBookLeaderboardRanking(rankingOrPage) ? rankingOrPage : "highest-rated";
+  const pageText = currentPage ?? rankingOrPage;
   const page = Number(pageText);
 
   if (!Number.isInteger(page)) {
@@ -468,7 +530,7 @@ export async function handleBookLeaderboardPage(interaction: ButtonInteraction) 
 
   await interaction.deferUpdate();
 
-  const message = await buildBookLeaderboardMessage(interaction.guildId, page);
+  const message = await buildBookLeaderboardMessage(interaction.guildId, page, ranking);
   await interaction.editReply({
     embeds: message.embeds,
     components: message.components,
