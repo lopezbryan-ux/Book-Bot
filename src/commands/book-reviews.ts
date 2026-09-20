@@ -4,7 +4,7 @@ import { buildBookReviewsMessage } from "../rating-views.js";
 
 export const data = new SlashCommandBuilder()
   .setName("book-reviews")
-  .setDescription("Read reviews members have left for a club book.")
+  .setDescription("See member ratings and reviews for a club book.")
   .addStringOption((option) =>
     option
       .setName("title")
@@ -69,9 +69,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply();
 
   const message = await buildBookReviewsMessage(interaction.guildId, book._id.toString(), 0);
-  if (message.totalReviews === 0) {
+  if (message.totalRatings === 0) {
     await interaction.editReply({
-      content: `No one has left a review for **${formatBookTitle(book.title, book.author)}** yet.`,
+      content: `No one has rated **${formatBookTitle(book.title, book.author)}** yet.`,
     });
     return;
   }

@@ -353,7 +353,7 @@ export async function buildBookLeaderboardMessage(guildId: string | null, page: 
 
 export async function buildBookReviewsMessage(guildId: string | null, bookId: string, page: number) {
   if (!ObjectId.isValid(bookId)) {
-    return { embeds: [], components: [], totalReviews: 0, book: null };
+    return { embeds: [], components: [], totalRatings: 0, book: null };
   }
 
   const { books } = getBookClubCollections();
@@ -364,21 +364,20 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
   });
 
   if (!book) {
-    return { embeds: [], components: [], totalReviews: 0, book: null };
+    return { embeds: [], components: [], totalRatings: 0, book: null };
   }
 
   const ratings = mongoClient.db(BOOK_BOT_DB_NAME).collection<RatingDocument>(BOOK_BOT_COLLECTION_NAME);
-  const reviewQuery = {
+  const ratingsQuery = {
     documentType: "rating" as const,
     guildId,
     normalizedTitle: book.normalizedTitle,
-    review: { $type: "string" as const, $ne: "" },
   };
-  const totalReviews = await ratings.countDocuments(reviewQuery);
-  const totalPages = Math.max(1, Math.ceil(totalReviews / BOOK_REVIEWS_PER_PAGE));
+  const totalRatings = await ratings.countDocuments(ratingsQuery);
+  const totalPages = Math.max(1, Math.ceil(totalRatings / BOOK_REVIEWS_PER_PAGE));
   const safePage = Math.min(Math.max(page, 0), totalPages - 1);
-  const pageReviews = await ratings
-    .find(reviewQuery)
+  const pageRatings = await ratings
+    .find(ratingsQuery)
     .sort({ updatedAt: -1 })
     .skip(safePage * BOOK_REVIEWS_PER_PAGE)
     .limit(BOOK_REVIEWS_PER_PAGE)
@@ -396,17 +395,20 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
     .setColor(0xd9a441)
     .setTitle(book.title)
     .setDescription(`${book.author ? `by **${book.author}**\n` : ""}${ratingSummaryText}`)
-    .setFooter({ text: `Review page ${safePage + 1} of ${totalPages}` })
+    .setFooter({ text: `Ratings and reviews page ${safePage + 1} of ${totalPages}` })
     .setTimestamp();
 
   if (book.imageUrl) {
     embed.setThumbnail(book.imageUrl);
   }
 
-  for (const review of pageReviews) {
+  for (const review of pageRatings) {
     const ratingDisplay = formatRating(review.rating);
     const reviewer = review.username?.trim() || "Unknown reviewer";
-    const reviewText = truncateEmbedValue(review.review ?? "", 900);
+    const writtenReview = review.review?.trim();
+    const reviewText = writtenReview
+      ? truncateEmbedValue(writtenReview, 900)
+      : "*No written review provided.*";
     embed.addFields({
       name: truncateEmbedFieldName(`${reviewer} - ${ratingDisplay.value}`),
       value: truncateEmbedValue(`> ${reviewText}\nUpdated ${formatDate(review.updatedAt)}`, 1024),
@@ -436,7 +438,7 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
         ]
       : [];
 
-  return { embeds: [embed], components, totalReviews, book };
+  return { embeds: [embed], components, totalRatings, book };
 }
 
 export async function handleRatingListPage(interaction: ButtonInteraction) {
