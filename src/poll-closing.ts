@@ -70,8 +70,7 @@ function buildVoteRevealLines(poll: PollDocument) {
   return lines;
 }
 
-function truncateAnnouncement(content: string) {
-  const maxLength = 1024;
+function truncateAnnouncement(content: string, maxLength = 1024) {
   if (content.length <= maxLength) return content;
 
   return `${content.slice(0, maxLength - 40)}\n...vote list truncated.`;
@@ -79,6 +78,42 @@ function truncateAnnouncement(content: string) {
 
 function formatPollType(poll: PollDocument) {
   return poll.pollType === "ranked" ? "Ranked poll" : "Regular poll";
+}
+
+function isCompleteRankedPollVote(vote: RankedPollVote, optionCount: number) {
+  const choices = [vote.first, vote.second, vote.third];
+  return (
+    choices.every((choice) => typeof choice === "number" && choice >= 0 && choice < optionCount) &&
+    new Set(choices).size === choices.length
+  );
+}
+
+function buildTiedBookVoteText(poll: PollDocument, tiedOptionIndexes: number[], scoreText: string) {
+  return tiedOptionIndexes
+    .map((optionIndex) => {
+      const option = poll.options[optionIndex];
+      if (!option) return null;
+
+      const voters = Object.entries(poll.votes ?? {}).flatMap(([userId, vote]) => {
+        if (typeof vote === "number") {
+          return vote === optionIndex ? [`<@${userId}>`] : [];
+        }
+
+        if (!isRankedPollVote(vote) || !isCompleteRankedPollVote(vote, poll.options.length)) return [];
+
+        const rank = [
+          { optionIndex: vote.first, label: "#1", points: 3 },
+          { optionIndex: vote.second, label: "#2", points: 2 },
+          { optionIndex: vote.third, label: "#3", points: 1 },
+        ].find((choice) => choice.optionIndex === optionIndex);
+
+        return rank ? [`<@${userId}> (${rank.label}, ${rank.points} point${rank.points === 1 ? "" : "s"})`] : [];
+      });
+
+      return `**${formatBookTitle(option.title, option.author)}** - ${scoreText}\nVoters: ${voters.join(", ") || "No valid voters recorded"}`;
+    })
+    .filter((line): line is string => Boolean(line))
+    .join("\n\n");
 }
 
 async function announcePollWinner(client: Client, poll: PollDocument, winner: PollDocument["winner"], scoreText: string) {
@@ -117,6 +152,32 @@ async function announcePollWinner(client: Client, poll: PollDocument, winner: Po
   });
 }
 
+async function announcePollTie(
+  client: Client,
+  poll: PollDocument,
+  tiedOptionIndexes: number[],
+  scoreText: string,
+) {
+  const channel = await client.channels.fetch(poll.channelId).catch(() => null);
+  if (!channel?.isTextBased() || !("send" in channel)) return;
+
+  const tiedBookVoteText = buildTiedBookVoteText(poll, tiedOptionIndexes, scoreText);
+  const embed = new EmbedBuilder()
+    .setColor(0xd6a84b)
+    .setTitle("Book Club Poll Tie")
+    .setDescription(truncateAnnouncement(tiedBookVoteText, 4096))
+    .addFields({ name: "Poll type", value: formatPollType(poll), inline: true })
+    .setTimestamp();
+
+  await channel.send({
+    content: "@everyone The book poll is over. It ended in a tie, so no book was added.",
+    embeds: [embed],
+    allowedMentions: {
+      parse: ["everyone"],
+    },
+  });
+}
+
 export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions): Promise<CloseActiveBookPollsResult> {
   const { books, nominations, polls } = getBookClubCollections();
   const now = options.now ?? new Date();
@@ -141,6 +202,12 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
     const { highestVoteCount, winners } = getWinningOptions(poll);
     const scoreLabel = poll.pollType === "ranked" ? "point" : "vote";
     const winner = winners.length === 1 ? winners[0] : null;
+    const tiedOptionIndexes =
+      winners.length > 1
+        ? poll.options.flatMap((option, index) =>
+            winners.some((tiedWinner) => tiedWinner.nominationId === option.nominationId) ? [index] : [],
+          )
+        : [];
     closedGuildIds.add(poll.guildId);
 
     if (winner && addWinners) {
@@ -198,8 +265,9 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
 
     await updatePollMessage(options.client, poll, closedPoll);
 
+    const scoreText = `${highestVoteCount} ${scoreLabel}${highestVoteCount === 1 ? "" : "s"}`;
+
     if (winner && addWinners) {
-      const scoreText = `${highestVoteCount} ${scoreLabel}${highestVoteCount === 1 ? "" : "s"}`;
       await announcePollWinner(options.client, poll, winner, scoreText);
 
       summaries.push(
@@ -213,6 +281,8 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
         )}** because this poll was closed manually.`,
       );
     } else if (winners.length > 1) {
+      await announcePollTie(options.client, poll, tiedOptionIndexes, scoreText);
+
       const tiedBooks = winners.map((tiedWinner) => `**${formatBookTitle(tiedWinner.title, tiedWinner.author)}**`).join(", ");
       summaries.push(`- Closed \`${poll.pollId}\`: no book added because there was a tie between ${tiedBooks}.`);
     } else {

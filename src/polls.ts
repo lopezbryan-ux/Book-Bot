@@ -189,6 +189,66 @@ function buildRankedStatus(poll: Pick<PollDocument, "votes" | "options">) {
   return `${completeBallots} complete ranked ballot${completeBallots === 1 ? "" : "s"}`;
 }
 
+interface RankedOptionVoter {
+  userId: string;
+  rank: number;
+  points: number;
+}
+
+function getRankedPollVotersByOption(poll: Pick<PollDocument, "options" | "votes">) {
+  const votersByOption = Array.from({ length: poll.options.length }, () => [] as RankedOptionVoter[]);
+
+  for (const [userId, vote] of Object.entries(poll.votes ?? {})) {
+    if (!isRankedPollVote(vote) || !isCompleteRankedVote(vote, poll.options.length)) continue;
+
+    for (const [rankIndex, optionIndex] of getRankedChoices(vote).entries()) {
+      if (typeof optionIndex !== "number") continue;
+
+      votersByOption[optionIndex]?.push({
+        userId,
+        rank: rankIndex + 1,
+        points: RANK_WEIGHTS[rankIndex] ?? 0,
+      });
+    }
+  }
+
+  return votersByOption;
+}
+
+function formatRankedPollVoters(voters: RankedOptionVoter[]) {
+  if (voters.length === 0) return "No votes yet";
+
+  const visibleVoters = voters
+    .slice(0, MAX_VISIBLE_VOTERS_PER_OPTION)
+    .map(({ userId, rank, points }) => `<@${userId}> (#${rank}, ${points} pt${points === 1 ? "" : "s"})`);
+  const hiddenCount = voters.length - visibleVoters.length;
+  return hiddenCount > 0 ? `${visibleVoters.join(", ")} and ${hiddenCount} more` : visibleVoters.join(", ");
+}
+
+function buildRankedPollDescription(
+  poll: Pick<PollDocument, "options" | "votes">,
+  options: PollOption[],
+  startIndex: number,
+  scores: number[],
+) {
+  const votersByOption = getRankedPollVotersByOption(poll);
+
+  return options
+    .map((option, index) => {
+      const optionIndex = startIndex + index;
+      const nomination = formatBookTitle(option.title, option.author);
+      const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
+      const score = scores[optionIndex] ?? 0;
+      const voters = votersByOption[optionIndex] ?? [];
+
+      return [
+        `**${optionIndex + 1}.** ${nomination}${cover} - ${formatScore(score, "ranked")}`,
+        `Voters: ${formatRankedPollVoters(voters)}`,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
 function formatPollCloseTime(closesAt?: Date | string | null) {
   if (!closesAt) return "Manual close";
 
@@ -212,15 +272,7 @@ export function buildPollEmbed(
       ? "No books have been nominated yet. Use `/nominate-book` to add books to this poll."
       : pollType === "regular"
         ? buildRegularPollDescription(poll, options, startIndex, scores)
-        : options
-            .map((option, index) => {
-              const optionIndex = startIndex + index;
-              const nomination = formatBookTitle(option.title, option.author);
-              const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
-              const score = scores[optionIndex] ?? 0;
-              return `**${optionIndex + 1}.** ${nomination}${cover} - ${formatScore(score, pollType)}`;
-            })
-            .join("\n");
+        : buildRankedPollDescription(poll, options, startIndex, scores);
 
   const statusText = pollType === "ranked" ? `Ranked poll - ${buildRankedStatus(poll)}` : "Regular poll";
   const footerText =
