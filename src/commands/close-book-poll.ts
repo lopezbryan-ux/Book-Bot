@@ -1,14 +1,33 @@
 import { ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
+import { getBookClubCollections } from "../book-club.js";
 import { closeActiveBookPolls } from "../poll-closing.js";
 
 export const data = new SlashCommandBuilder()
   .setName("close-book-poll")
-  .setDescription("Close every active book poll.");
+  .setDescription("Close the active book poll you created.");
 
 export async function execute(interaction: ChatInputCommandInteraction) {
+  const { polls } = getBookClubCollections();
+  const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
+
+  if (!activePoll) {
+    await interaction.reply({ content: "There are no active polls to close.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  if (activePoll.createdBy !== interaction.user.id) {
+    await interaction.reply({
+      content: "Only the person who created this poll can close it.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   const result = await closeActiveBookPolls({
     client: interaction.client,
+    createdBy: interaction.user.id,
     guildId: interaction.guildId,
+    pollId: activePoll.pollId,
   });
 
   if (result.closedCount === 0) {

@@ -6,8 +6,10 @@ import { invalidateRatingViewsCache } from "./rating-views.js";
 interface CloseActiveBookPollsOptions {
   client: Client;
   addWinners?: boolean;
+  createdBy?: string;
   guildId?: string | null;
   overdueOnly?: boolean;
+  pollId?: string;
   now?: Date;
 }
 
@@ -189,6 +191,14 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
 
   if (options.guildId !== undefined) {
     query.guildId = options.guildId;
+  }
+
+  if (options.createdBy !== undefined) {
+    query.createdBy = options.createdBy;
+  }
+
+  if (options.pollId !== undefined) {
+    query.pollId = options.pollId;
   }
 
   if (options.overdueOnly) {

@@ -184,6 +184,18 @@ function buildRegularPollDescription(
     .join("\n\n");
 }
 
+function buildHiddenPollDescription(options: PollOption[], startIndex: number) {
+  return options
+    .map((option, index) => {
+      const optionIndex = startIndex + index;
+      const nomination = formatBookTitle(option.title, option.author);
+      const cover = option.imageUrl ? ` ([cover](${option.imageUrl}))` : "";
+
+      return `**${optionIndex + 1}  ·  ${nomination}**${cover}`;
+    })
+    .join("\n\n");
+}
+
 function buildRankedStatus(poll: Pick<PollDocument, "votes" | "options">) {
   const ballots = Object.values(poll.votes ?? {}).filter(isRankedPollVote);
   const completeBallots = ballots.filter((vote) => isCompleteRankedVote(vote, poll.options.length)).length;
@@ -265,8 +277,8 @@ function buildPollInstructions(pollType: PollType, isActive: boolean) {
   if (!isActive) return "Voting has ended. Here are the final results.";
 
   return pollType === "ranked"
-    ? "Rank your **top three books**. First place earns 3 points, second earns 2, and third earns 1."
-    : "Choose **one book** using its numbered button below. You can change your vote any time before the poll closes.";
+    ? "Rank your **top three books**. First place earns 3 points, second earns 2, and third earns 1. Votes and results stay hidden until the poll ends."
+    : "Choose **one book** using its numbered button below. You can change your vote any time before the poll closes. Votes and results stay hidden until the poll ends.";
 }
 
 function buildParticipationText(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
@@ -283,16 +295,18 @@ export function buildPollEmbed(
   page = 0,
 ) {
   const pollType = getPollType(poll);
-  const scores = getPollScores(poll);
   const totalPages = getPollTotalPages(poll);
   const { safePage, startIndex, options } = getPollPageOptions(poll, page);
   const isActive = poll.status === "active";
+  const scores = isActive ? [] : getPollScores(poll);
   const results =
     poll.options.length === 0
       ? "*No books have been nominated yet. Use `/nominate-book` to add the first one.*"
-      : pollType === "regular"
-        ? buildRegularPollDescription(poll, options, startIndex, scores)
-        : buildRankedPollDescription(poll, options, startIndex, scores);
+      : isActive
+        ? buildHiddenPollDescription(options, startIndex)
+        : pollType === "regular"
+          ? buildRegularPollDescription(poll, options, startIndex, scores)
+          : buildRankedPollDescription(poll, options, startIndex, scores);
   const description = `${buildPollInstructions(pollType, isActive)}\n\n${results}`;
   const votingStyle = pollType === "ranked" ? "Rank your top 3 · 3–2–1 points" : "Pick one book";
   const footerText =
@@ -309,7 +323,11 @@ export function buildPollEmbed(
         value: formatPollCloseTime(isActive ? poll.closesAt : (poll.closedAt ?? poll.closesAt)),
         inline: true,
       },
-      { name: "👥  Participation", value: buildParticipationText(poll), inline: true },
+      {
+        name: "👥  Participation",
+        value: isActive ? "Hidden until the poll ends" : buildParticipationText(poll),
+        inline: true,
+      },
     )
     .setFooter({ text: footerText });
 }
