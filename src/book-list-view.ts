@@ -119,9 +119,10 @@ export async function buildBookListMessage(guildId: string | null, selectedSort:
     .setTitle("📚  Book Club Library")
     .setDescription(`*${sortOption.description}*\nUse the menu below to rearrange the shelf.`)
     .addFields(
-      selectedBooks.map((book: BookDocument, index: number) => ({
-        name: `${String(index + 1).padStart(2, "0")}  •  ${escapeMarkdown(book.title).slice(0, 235)}`,
-        value: formatBookDetails(book),
+      selectedBooks.map((book: BookDocument) => ({
+        name: `📖  ${escapeMarkdown(book.title).slice(0, 235)}`,
+        value: `> ${formatBookDetails(book)}`,
+        inline: false,
       })),
     )
     .setFooter({
