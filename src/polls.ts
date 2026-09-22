@@ -200,7 +200,7 @@ function buildRankedStatus(poll: Pick<PollDocument, "votes" | "options">) {
   const ballots = Object.values(poll.votes ?? {}).filter(isRankedPollVote);
   const completeBallots = ballots.filter((vote) => isCompleteRankedVote(vote, poll.options.length)).length;
 
-  return `${completeBallots} complete ranked ballot${completeBallots === 1 ? "" : "s"}`;
+  return `${completeBallots} complete ballot${completeBallots === 1 ? "" : "s"}`;
 }
 
 interface RankedOptionVoter {
@@ -325,7 +325,7 @@ export function buildPollEmbed(
       },
       {
         name: "👥  Participation",
-        value: isActive ? "Hidden until the poll ends" : buildParticipationText(poll),
+        value: buildParticipationText(poll),
         inline: true,
       },
     )
