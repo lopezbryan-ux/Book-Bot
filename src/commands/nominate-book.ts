@@ -2,7 +2,6 @@ import { ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "
 import { randomUUID } from "node:crypto";
 import {
   NominationDocument,
-  PollDocument,
   PollOption,
   formatBookTitle,
   getBookClubCollections,
@@ -10,7 +9,9 @@ import {
   normalizeTitle,
 } from "../book-club.js";
 import { remapPollVotes } from "../poll-votes.js";
-import { buildPollComponents, buildPollEmbed } from "../polls.js";
+import { refreshPollMessage } from "../polls.js";
+import { mongoClient } from "../mongo.js";
+import { isPollOpen, openPollFilter, PollClosedError } from "../poll-state.js";
 
 export const data = new SlashCommandBuilder()
   .setName("nominate-book")
@@ -40,23 +41,6 @@ function buildPollOption(nomination: NominationDocument): PollOption {
   };
 }
 
-async function refreshPollMessage(interaction: ChatInputCommandInteraction, poll: PollDocument) {
-  if (!poll.messageId) return;
-
-  const channel =
-    poll.channelId === interaction.channelId
-      ? interaction.channel
-      : await interaction.client.channels.fetch(poll.channelId).catch(() => null);
-
-  if (!channel?.isTextBased()) return;
-
-  const pollMessage = await channel.messages.fetch(poll.messageId).catch(() => null);
-  await pollMessage?.edit({
-    embeds: [buildPollEmbed(poll)],
-    components: buildPollComponents(poll),
-  });
-}
-
 export async function execute(interaction: ChatInputCommandInteraction) {
   const title = interaction.options.getString("title", true).trim();
   const author = interaction.options.getString("author")?.trim() || null;
@@ -64,148 +48,93 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const imageUrlInput = interaction.options.getString("image-url")?.trim() || null;
   const imageUrl = getImageUrlOrNull(imageUrlInput);
 
-  if (!title) {
-    await interaction.reply({ content: "Give me a book title to nominate.", flags: MessageFlags.Ephemeral });
-    return;
-  }
-
-  if (imageUrlInput && !imageUrl) {
+  if (!title || (imageUrlInput && !imageUrl)) {
     await interaction.reply({
-      content: "That image URL does not look valid. Use a full `https://...` or `http://...` URL.",
+      content: !title ? "Give me a book title to nominate." : "That image URL does not look valid. Use a full `https://...` or `http://...` URL.",
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
+  await interaction.deferReply();
   const { nominations, polls } = getBookClubCollections();
-  const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" });
-  if (!activePoll) {
-    await interaction.reply({
-      content: "There is no active book poll right now. Start one with `/start-book-poll` before nominating books.",
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
+  const result = await mongoClient.withSession((session) => session.withTransaction(async () => {
+    const activePoll = await polls.findOne({ guildId: interaction.guildId, status: "active" }, { session });
+    if (!activePoll || !isPollOpen(activePoll)) {
+      return { error: "There is no open book poll right now. Start one with `/start-book-poll` before nominating books." };
+    }
 
-  const now = new Date();
-  const normalizedTitle = normalizeTitle(title);
-  const canNominateMultiple = activePoll.createdBy === interaction.user.id;
-  const nominationLookup = {
-    documentType: "nomination",
-    guildId: interaction.guildId,
-    nominatedBy: interaction.user.id,
-    status: "nominated",
-    ...(canNominateMultiple ? { normalizedTitle } : {}),
-  } as const;
-  const existingNomination = await nominations.findOne(nominationLookup);
-  const nominationId = existingNomination?.nominationId ?? randomUUID();
-
-  const result = await nominations.updateOne(
-    nominationLookup,
-    {
-      $set: {
-        title,
-        normalizedTitle,
-        author,
-        reason,
-        imageUrl,
-        guildId: interaction.guildId,
-        channelId: interaction.channelId,
-        nominatedBy: interaction.user.id,
-        nominatedByUsername: interaction.user.username,
-        updatedAt: now,
-      },
-      $setOnInsert: {
-        nominationId,
-        documentType: "nomination",
-        status: "nominated",
-        createdAt: now,
-      },
-    },
-    { upsert: true },
-  );
-
-  if (!canNominateMultiple) {
-    await nominations.deleteMany({
-      documentType: "nomination",
+    const now = new Date();
+    const normalizedTitle = normalizeTitle(title);
+    const canNominateMultiple = activePoll.createdBy === interaction.user.id;
+    const nominationLookup = {
+      documentType: "nomination" as const,
       guildId: interaction.guildId,
       nominatedBy: interaction.user.id,
-      status: "nominated",
-      nominationId: { $ne: nominationId },
-    });
-  }
+      status: "nominated" as const,
+      ...(canNominateMultiple ? { normalizedTitle } : {}),
+    };
+    const existingNomination = await nominations.findOne(nominationLookup, { session });
+    const replacedBook = !!existingNomination && (
+      existingNomination.normalizedTitle !== normalizedTitle ||
+      normalizeTitle(existingNomination.author ?? "") !== normalizeTitle(author ?? "")
+    );
+    // A different book gets a different ID; votes must not transfer to its replacement.
+    const nominationId = !replacedBook && existingNomination ? existingNomination.nominationId : randomUUID();
+    const nominationUpdate = await nominations.updateOne(nominationLookup, {
+      $set: {
+        nominationId, title, normalizedTitle, author, reason, imageUrl,
+        guildId: interaction.guildId, channelId: interaction.channelId,
+        nominatedBy: interaction.user.id, nominatedByUsername: interaction.user.username, updatedAt: now,
+      },
+      $setOnInsert: { documentType: "nomination", status: "nominated", createdAt: now },
+    }, { upsert: true, session });
 
-  const nomination = await nominations.findOne({
-    documentType: "nomination",
-    guildId: interaction.guildId,
-    nominationId,
-    status: "nominated",
+    if (!canNominateMultiple) {
+      await nominations.deleteMany({
+        documentType: "nomination", guildId: interaction.guildId, nominatedBy: interaction.user.id,
+        status: "nominated", nominationId: { $ne: nominationId },
+      }, { session });
+    }
+    const nomination = await nominations.findOne({ nominationId, guildId: interaction.guildId }, { session });
+    if (!nomination) throw new Error("The saved nomination could not be found.");
+
+    const pollOption = buildPollOption(nomination);
+    const belongsToNomination = (option: PollOption) =>
+      option.nominationId === nominationId ||
+      option.nominationId === existingNomination?.nominationId ||
+      (!canNominateMultiple && option.nominatedBy === interaction.user.id);
+    const optionIndex = activePoll.options.findIndex(belongsToNomination);
+    const options: PollOption[] = [];
+    const indexMap = new Map<number, number>();
+    activePoll.options.forEach((option, index) => {
+      if (belongsToNomination(option) && index !== optionIndex) return;
+      // Preserve votes only when the nomination still represents the same book.
+      if (index !== optionIndex || option.nominationId === nominationId) indexMap.set(index, options.length);
+      options.push(index === optionIndex ? pollOption : option);
+    });
+    if (optionIndex < 0) options.push(pollOption);
+    const votes = remapPollVotes(activePoll.votes, indexMap);
+    const update = await polls.updateOne(openPollFilter(activePoll.pollId, interaction.guildId), {
+      $set: { options, votes, updatedAt: now },
+    }, { session });
+    if (update.matchedCount === 0) throw new PollClosedError();
+
+    return {
+      poll: { ...activePoll, options, votes, updatedAt: now },
+      action: nominationUpdate.upsertedCount > 0 ? "Nominated" : canNominateMultiple ? "Updated your nomination for" : "Replaced your nomination with",
+      pollText: optionIndex < 0 ? "Added this book to the active poll." : replacedBook ? "Votes for the previous book were cleared. Members can vote again." : "Updated this book in the active poll.",
+    };
+  }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } })).catch((error: unknown) => {
+    if (error instanceof PollClosedError) return { error: error.message };
+    throw error;
   });
 
-  let pollText = "";
-
-  if (nomination) {
-    const pollOption = buildPollOption(nomination);
-    const optionIndex = activePoll.options.findIndex(
-      (option) =>
-        option.nominationId === nomination.nominationId ||
-        (!canNominateMultiple && option.nominatedBy === interaction.user.id),
-    );
-
-    if (optionIndex >= 0) {
-      const dedupedOptions: PollOption[] = [];
-      const indexMap = new Map<number, number>();
-
-      activePoll.options.forEach((option, index) => {
-        const belongsToCurrentNomination =
-          option.nominationId === nomination.nominationId ||
-          (!canNominateMultiple && option.nominatedBy === interaction.user.id);
-        if (belongsToCurrentNomination && index !== optionIndex) return;
-
-        indexMap.set(index, dedupedOptions.length);
-        dedupedOptions.push(index === optionIndex ? pollOption : option);
-      });
-
-      await polls.updateOne(
-        { pollId: activePoll.pollId, guildId: interaction.guildId },
-        {
-          $set: {
-            options: dedupedOptions,
-            votes: remapPollVotes(activePoll.votes, indexMap),
-            updatedAt: now,
-          },
-        },
-      );
-      pollText = canNominateMultiple
-        ? "\nUpdated this book in the active poll."
-        : "\nReplaced your book in the active poll.";
-    } else {
-      await polls.updateOne(
-        { pollId: activePoll.pollId, guildId: interaction.guildId },
-        {
-          $push: {
-            options: pollOption,
-          },
-          $set: {
-            updatedAt: now,
-          },
-        },
-      );
-      pollText = "\nAdded this book to the active poll.";
-    }
-
-    const updatedPoll = await polls.findOne({ pollId: activePoll.pollId, guildId: interaction.guildId });
-    if (updatedPoll) {
-      await refreshPollMessage(interaction, updatedPoll);
-    }
+  if ("error" in result) {
+    await interaction.editReply({ content: result.error });
+    return;
   }
-
-  const action =
-    result.upsertedCount > 0
-      ? "Nominated"
-      : canNominateMultiple
-        ? "Updated your nomination for"
-        : "Replaced your nomination with";
+  await refreshPollMessage(interaction.client, result.poll);
   const imageText = imageUrl ? `\nCover: ${imageUrl}` : "";
-  await interaction.reply(`${action} **${formatBookTitle(title, author)}**.${imageText}${pollText}`);
+  await interaction.editReply(`${result.action} **${formatBookTitle(title, author)}**.${imageText}\n${result.pollText}`);
 }

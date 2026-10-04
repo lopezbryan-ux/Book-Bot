@@ -23,6 +23,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return;
   }
 
+  await interaction.deferReply();
   const result = await closeActiveBookPolls({
     client: interaction.client,
     createdBy: interaction.user.id,
@@ -31,11 +32,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   });
 
   if (result.closedCount === 0) {
-    await interaction.reply({ content: "There are no active polls to close.", flags: MessageFlags.Ephemeral });
+    await interaction.editReply({ content: "There are no active polls to close." });
     return;
   }
 
-  await interaction.reply(
+  await interaction.editReply(
     `Closed ${result.closedCount} active poll${result.closedCount === 1 ? "" : "s"} and cleared ${
       result.clearedNominationCount
     } nomination${result.clearedNominationCount === 1 ? "" : "s"}.\n${result.summaries.join("\n")}`,

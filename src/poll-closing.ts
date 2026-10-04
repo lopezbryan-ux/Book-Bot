@@ -1,6 +1,7 @@
 import { Client, EmbedBuilder } from "discord.js";
-import { formatBookTitle, getBookClubCollections, PollDocument, RankedPollVote } from "./book-club.js";
-import { buildPollComponents, buildPollEmbed, getWinningOptions } from "./polls.js";
+import { formatBookTitle, getBookClubCollections, PollDocument } from "./book-club.js";
+import { getValidPollVotes, getWinningOptions, refreshPollMessage } from "./polls.js";
+import { mongoClient } from "./mongo.js";
 import { invalidateRatingViewsCache } from "./rating-views.js";
 
 interface CloseActiveBookPollsOptions {
@@ -19,27 +20,10 @@ export interface CloseActiveBookPollsResult {
   summaries: string[];
 }
 
-async function updatePollMessage(client: Client, poll: PollDocument, closedPoll: PollDocument) {
-  if (!poll.messageId) return;
-
-  const channel = await client.channels.fetch(poll.channelId).catch(() => null);
-  if (!channel?.isTextBased() || !("messages" in channel)) return;
-
-  const pollMessage = await channel.messages.fetch(poll.messageId).catch(() => null);
-  await pollMessage?.edit({
-    embeds: [buildPollEmbed(closedPoll)],
-    components: buildPollComponents(closedPoll, true),
-  });
-}
-
-function isRankedPollVote(value: unknown): value is RankedPollVote {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function buildVoteRevealLines(poll: PollDocument) {
   const lines: string[] = [];
 
-  for (const [userId, vote] of Object.entries(poll.votes ?? {})) {
+  for (const [userId, vote] of getValidPollVotes(poll)) {
     if (typeof vote === "number") {
       const option = poll.options[vote];
       if (!option) continue;
@@ -47,8 +31,6 @@ function buildVoteRevealLines(poll: PollDocument) {
       lines.push(`- <@${userId}> voted for **${formatBookTitle(option.title, option.author)}**: 1 point`);
       continue;
     }
-
-    if (!isRankedPollVote(vote)) continue;
 
     const rankedLines = [
       { label: "#1", optionIndex: vote.first, points: 3 },
@@ -83,26 +65,18 @@ function formatPollType(poll: PollDocument) {
   return poll.pollType === "ranked" ? "Ranked poll" : "Regular poll";
 }
 
-function isCompleteRankedPollVote(vote: RankedPollVote, optionCount: number) {
-  const choices = [vote.first, vote.second, vote.third];
-  return (
-    choices.every((choice) => typeof choice === "number" && choice >= 0 && choice < optionCount) &&
-    new Set(choices).size === choices.length
-  );
-}
-
 function buildTiedBookVoteText(poll: PollDocument, tiedOptionIndexes: number[], scoreText: string) {
+  const votes = getValidPollVotes(poll);
+
   return tiedOptionIndexes
     .map((optionIndex) => {
       const option = poll.options[optionIndex];
       if (!option) return null;
 
-      const voters = Object.entries(poll.votes ?? {}).flatMap(([userId, vote]) => {
+      const voters = votes.flatMap(([userId, vote]) => {
         if (typeof vote === "number") {
           return vote === optionIndex ? [`<@${userId}>`] : [];
         }
-
-        if (!isRankedPollVote(vote) || !isCompleteRankedPollVote(vote, poll.options.length)) return [];
 
         const rank = [
           { optionIndex: vote.first, label: "#1", points: 3 },
@@ -207,75 +181,79 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
 
   const activePolls = await polls.find(query).sort({ createdAt: 1 }).toArray();
   const summaries: string[] = [];
-  const closedGuildIds = new Set<string | null>();
+  let closedCount = 0;
+  let clearedNominationCount = 0;
 
-  for (const poll of activePolls) {
-    const { highestVoteCount, winners } = getWinningOptions(poll);
+  for (const candidate of activePolls) {
+    const result = await mongoClient.withSession((session) => session.withTransaction(async () => {
+      // Re-read inside the transaction. A vote arriving after the initial scan
+      // must either be included here or cause a write conflict and a fresh retry.
+      const poll = await polls.findOne({ ...query, pollId: candidate.pollId, guildId: candidate.guildId }, { session });
+      if (!poll) return null;
+
+      const { highestVoteCount, winners } = getWinningOptions(poll);
+      const winner = winners.length === 1 ? winners[0] : null;
+      const closedAt = options.now ?? new Date();
+      const closedPoll: PollDocument = { ...poll, status: "closed", winner, closedAt, updatedAt: closedAt };
+      const update = await polls.updateOne(
+        { pollId: poll.pollId, guildId: poll.guildId, status: "active" },
+        { $set: { status: "closed", winner, closedAt, updatedAt: closedAt } },
+        { session },
+      );
+      if (update.matchedCount === 0) return null;
+
+      if (winner && addWinners) {
+        await books.updateOne(
+          { documentType: "book", guildId: poll.guildId, normalizedTitle: winner.normalizedTitle },
+          {
+            $set: {
+              documentType: "book",
+              guildId: poll.guildId,
+              title: winner.title,
+              normalizedTitle: winner.normalizedTitle,
+              author: winner.author,
+              imageUrl: winner.imageUrl,
+              source: "poll",
+              sourcePollId: poll.pollId,
+              note: null,
+              addedBy: null,
+              addedByUsername: null,
+              selectedAt: closedAt,
+              updatedAt: closedAt,
+            },
+          },
+          { upsert: true, session },
+        );
+        await nominations.updateOne(
+          { nominationId: winner.nominationId, guildId: poll.guildId },
+          { $set: { status: "selected", updatedAt: closedAt } },
+          { session },
+        );
+      }
+
+      const cleared = await nominations.deleteMany({
+        documentType: "nomination",
+        guildId: poll.guildId,
+        nominationId: { $in: poll.options.map((option) => option.nominationId) },
+      }, { session });
+      return { poll: closedPoll, highestVoteCount, winners, clearedCount: cleared.deletedCount };
+    }, { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } }));
+    if (!result) continue;
+
+    const { poll, highestVoteCount, winners } = result;
+    const winner = poll.winner;
+    closedCount += 1;
+    clearedNominationCount += result.clearedCount;
     const scoreLabel = poll.pollType === "ranked" ? "point" : "vote";
-    const winner = winners.length === 1 ? winners[0] : null;
     const tiedOptionIndexes =
       winners.length > 1
         ? poll.options.flatMap((option, index) =>
             winners.some((tiedWinner) => tiedWinner.nominationId === option.nominationId) ? [index] : [],
           )
         : [];
-    closedGuildIds.add(poll.guildId);
-
-    if (winner && addWinners) {
-      await books.updateOne(
-        {
-          documentType: "book",
-          guildId: poll.guildId,
-          normalizedTitle: winner.normalizedTitle,
-        },
-        {
-          $set: {
-            documentType: "book",
-            guildId: poll.guildId,
-            title: winner.title,
-            normalizedTitle: winner.normalizedTitle,
-            author: winner.author,
-            imageUrl: winner.imageUrl,
-            source: "poll",
-            sourcePollId: poll.pollId,
-            note: null,
-            addedBy: null,
-            addedByUsername: null,
-            selectedAt: now,
-            updatedAt: now,
-          },
-        },
-        { upsert: true },
-      );
-      invalidateRatingViewsCache(poll.guildId);
-
-      await nominations.updateOne(
-        { nominationId: winner.nominationId, guildId: poll.guildId },
-        { $set: { status: "selected", updatedAt: now } },
-      );
-    }
-
-    const closedPoll: PollDocument = {
-      ...poll,
-      status: "closed",
-      winner,
-      closedAt: now,
-      updatedAt: now,
-    };
-
-    await polls.updateOne(
-      { pollId: poll.pollId, guildId: poll.guildId },
-      {
-        $set: {
-          status: "closed",
-          winner,
-          closedAt: now,
-          updatedAt: now,
-        },
-      },
-    );
-
-    await updatePollMessage(options.client, poll, closedPoll);
+    if (winner && addWinners) invalidateRatingViewsCache(poll.guildId);
+    // External effects only run after the transaction has committed successfully.
+    await refreshPollMessage(options.client, poll);
 
     const scoreText = `${highestVoteCount} ${scoreLabel}${highestVoteCount === 1 ? "" : "s"}`;
 
@@ -298,21 +276,12 @@ export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions)
       const tiedBooks = winners.map((tiedWinner) => `**${formatBookTitle(tiedWinner.title, tiedWinner.author)}**`).join(", ");
       summaries.push(`- Closed \`${poll.pollId}\`: no book added because there was a tie between ${tiedBooks}.`);
     } else {
-      summaries.push(`- Closed \`${poll.pollId}\`: no book added because nobody voted.`);
+      summaries.push(`- Closed \`${poll.pollId}\`: no book added because no valid votes were recorded.`);
     }
   }
 
-  let clearedNominationCount = 0;
-  for (const guildId of closedGuildIds) {
-    const result = await nominations.deleteMany({
-      documentType: "nomination",
-      guildId,
-    });
-    clearedNominationCount += result.deletedCount;
-  }
-
   return {
-    closedCount: activePolls.length,
+    closedCount,
     clearedNominationCount,
     summaries,
   };

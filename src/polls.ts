@@ -3,12 +3,14 @@ import {
   ButtonBuilder,
   ButtonInteraction,
   ButtonStyle,
+  Client,
   EmbedBuilder,
   MessageFlags,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
 } from "discord.js";
 import { getBookClubCollections, PollDocument, PollOption, PollType, RankedPollVote, formatBookTitle } from "./book-club.js";
+import { isPollOpen, openPollFilter } from "./poll-state.js";
 
 const POLL_VOTE_PREFIX = "book-poll:vote";
 const POLL_RANK_PREFIX = "book-poll:rank";
@@ -23,10 +25,11 @@ const ACTIVE_POLL_COLOR = 0x5865f2;
 const CLOSED_POLL_COLOR = 0x747f8d;
 
 type PollComponentRow = ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>;
-type PollComponentPoll = Pick<PollDocument, "options" | "pollId" | "pollType" | "votes">;
+type PollComponentPoll = Pick<PollDocument, "options" | "pollId" | "pollType" | "votes" | "status" | "closesAt">;
+const pollMessageUpdates = new Map<string, Promise<void>>();
 
-export function buildPollCustomId(pollId: string, optionIndex: number, page: number) {
-  return `${POLL_VOTE_PREFIX}:${pollId}:${optionIndex}:${page}`;
+export function buildPollCustomId(pollId: string, nominationId: string, page: number) {
+  return `${POLL_VOTE_PREFIX}:${pollId}:${nominationId}:${page}`;
 }
 
 export function buildPollRankCustomId(pollId: string, rankIndex: number, page: number) {
@@ -99,7 +102,7 @@ function hasDuplicateRankedChoices(vote: RankedPollVote) {
 function isCompleteRankedVote(vote: RankedPollVote, optionCount: number) {
   const choices = getRankedChoices(vote);
   return (
-    choices.every((choice) => typeof choice === "number" && choice >= 0 && choice < optionCount) &&
+    choices.every((choice) => typeof choice === "number" && Number.isInteger(choice) && choice >= 0 && choice < optionCount) &&
     !hasDuplicateRankedChoices(vote)
   );
 }
@@ -116,7 +119,7 @@ function getRankedChoiceForUser(poll: Pick<PollDocument, "options" | "votes">, r
   if (!vote) return null;
 
   const choice = vote[RANK_KEYS[rankIndex]];
-  return typeof choice === "number" && choice >= 0 && choice < poll.options.length ? choice : null;
+  return typeof choice === "number" && Number.isInteger(choice) && choice >= 0 && choice < poll.options.length ? choice : null;
 }
 
 function getRankedChoicePlaceholder(poll: Pick<PollDocument, "options">, rankIndex: number, selectedOptionIndex: number | null) {
@@ -297,7 +300,7 @@ export function buildPollEmbed(
   const pollType = getPollType(poll);
   const totalPages = getPollTotalPages(poll);
   const { safePage, startIndex, options } = getPollPageOptions(poll, page);
-  const isActive = poll.status === "active";
+  const isActive = isPollOpen(poll);
   const scores = isActive ? [] : getPollScores(poll);
   const results =
     poll.options.length === 0
@@ -334,6 +337,7 @@ export function buildPollEmbed(
 
 export function buildPollComponents(poll: PollComponentPoll, disabled = false, page = 0, viewerUserId?: string) {
   if (poll.options.length === 0) return [];
+  disabled = disabled || !isPollOpen(poll);
 
   return getPollType(poll) === "ranked"
     ? viewerUserId
@@ -351,11 +355,11 @@ function buildRegularPollComponents(poll: Pick<PollDocument, "options" | "pollId
     const row = new ActionRowBuilder<ButtonBuilder>();
     const rowOptions = options.slice(index, index + 5);
 
-    for (const [offset] of rowOptions.entries()) {
+    for (const [offset, option] of rowOptions.entries()) {
       const optionIndex = startIndex + index + offset;
       row.addComponents(
         new ButtonBuilder()
-          .setCustomId(buildPollCustomId(poll.pollId, optionIndex, safePage))
+          .setCustomId(buildPollCustomId(poll.pollId, option.nominationId, safePage))
           .setLabel(`Vote ${optionIndex + 1}`)
           .setStyle(ButtonStyle.Primary)
           .setDisabled(disabled),
@@ -412,7 +416,7 @@ function buildRankedPollBallotComponents(
       return {
         default: optionIndex === selectedOptionIndex,
         label: truncateMenuText(`${optionIndex + 1}. ${formatBookTitle(option.title, option.author)}`),
-        value: String(optionIndex),
+        value: option.nominationId,
       };
     });
 
@@ -462,24 +466,41 @@ function isEphemeralMessageInteraction(interaction: ButtonInteraction | StringSe
   return interaction.message.flags.has(MessageFlags.Ephemeral);
 }
 
-async function refreshPublicPollMessage(interaction: ButtonInteraction | StringSelectMenuInteraction, poll: PollDocument, page = 0) {
+export async function refreshPollMessage(client: Client, poll: PollDocument, page = 0) {
   if (!poll.messageId) return;
+  const key = `${poll.guildId}:${poll.pollId}`;
+  const previous = pollMessageUpdates.get(key) ?? Promise.resolve();
+  const update = previous.catch(() => {}).then(async () => {
+    const channel = await client.channels.fetch(poll.channelId).catch(() => null);
+    if (!channel?.isTextBased() || !("messages" in channel)) return;
 
-  const channel =
-    poll.channelId === interaction.channelId
-      ? interaction.channel
-      : await interaction.client.channels.fetch(poll.channelId).catch(() => null);
+    const pollMessage = await channel.messages.fetch(poll.messageId!).catch(() => null);
+    if (!pollMessage) return;
 
-  if (!channel?.isTextBased() || !("messages" in channel)) return;
+    const { polls } = getBookClubCollections();
+    const latestPoll = await polls.findOne({ pollId: poll.pollId, guildId: poll.guildId });
+    if (!latestPoll) return;
 
-  const pollMessage = await channel.messages.fetch(poll.messageId).catch(() => null);
-  await pollMessage?.edit({
-    embeds: [buildPollEmbed(poll, page)],
-    components: buildPollComponents(poll, false, page),
+    await pollMessage.edit({
+      embeds: [buildPollEmbed(latestPoll, page)],
+      components: buildPollComponents(latestPoll, false, page),
+    });
   });
+  pollMessageUpdates.set(key, update);
+  try {
+    await update;
+  } finally {
+    if (pollMessageUpdates.get(key) === update) pollMessageUpdates.delete(key);
+  }
 }
 
-function buildPrivateRankedBallot(poll: PollDocument, page: number, userId: string, content = "Your ranked ballot for this poll:") {
+function buildPrivateRankedBallot(poll: PollDocument, page: number, userId: string, content?: string) {
+  if (!content) {
+    const vote = getRankedVoteForUser(poll, userId);
+    content = vote && !isCompleteRankedVote(vote, poll.options.length)
+      ? "Your ballot does not count yet. Choose three different books that are still in this poll."
+      : "Your ranked ballot for this poll:";
+  }
   return {
     content,
     embeds: [buildPollEmbed(poll, page)],
@@ -487,27 +508,29 @@ function buildPrivateRankedBallot(poll: PollDocument, page: number, userId: stri
   };
 }
 
+export function getValidPollVotes(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
+  const isRanked = getPollType(poll) === "ranked";
+
+  return Object.entries(poll.votes ?? {}).filter(([, vote]) =>
+    isRanked
+      ? isRankedPollVote(vote) && isCompleteRankedVote(vote, poll.options.length)
+      : typeof vote === "number" && Number.isInteger(vote) && vote >= 0 && vote < poll.options.length,
+  );
+}
+
 export function getPollScores(poll: Pick<PollDocument, "options" | "pollType" | "votes">) {
   const scores = Array.from({ length: poll.options.length }, () => 0);
 
-  if (getPollType(poll) === "ranked") {
-    for (const vote of Object.values(poll.votes ?? {})) {
-      if (!isRankedPollVote(vote) || !isCompleteRankedVote(vote, poll.options.length)) continue;
-
-      const choices = getRankedChoices(vote);
-      for (const [rankIndex, optionIndex] of choices.entries()) {
-        if (typeof optionIndex === "number") {
-          scores[optionIndex] += RANK_WEIGHTS[rankIndex] ?? 0;
-        }
-      }
+  for (const [, vote] of getValidPollVotes(poll)) {
+    if (typeof vote === "number") {
+      scores[vote] += 1;
+      continue;
     }
 
-    return scores;
-  }
-
-  for (const optionIndex of Object.values(poll.votes ?? {})) {
-    if (typeof optionIndex === "number" && Number.isInteger(optionIndex) && optionIndex >= 0 && optionIndex < scores.length) {
-      scores[optionIndex] += 1;
+    for (const [rankIndex, optionIndex] of getRankedChoices(vote).entries()) {
+      if (typeof optionIndex === "number") {
+        scores[optionIndex] += RANK_WEIGHTS[rankIndex] ?? 0;
+      }
     }
   }
 
@@ -530,63 +553,73 @@ export function getWinningOptions(poll: Pick<PollDocument, "options" | "pollType
   return { counts, highestVoteCount, winners };
 }
 
+type SavePollVoteResult =
+  | { ok: true; poll: PollDocument; selectedOption: PollOption }
+  | { ok: false; poll?: PollDocument | null; error: string };
+
+async function savePollVote(
+  pollId: string,
+  guildId: string | null,
+  userId: string,
+  nominationId: string,
+  rankKey?: (typeof RANK_KEYS)[number],
+): Promise<SavePollVoteResult> {
+  const { polls } = getBookClubCollections();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const poll = await polls.findOne({ pollId, guildId });
+    if (!poll || !isPollOpen(poll)) return { ok: false, poll, error: "Voting has ended for this poll." };
+
+    if (getPollType(poll) !== (rankKey ? "ranked" : "regular")) {
+      return { ok: false, poll, error: rankKey ? "Use the vote buttons for this regular poll." : "Use the ranking menus for this ranked poll." };
+    }
+
+    // Positional controls from an older deployment cannot identify their original book safely.
+    if (/^\d+$/.test(nominationId)) {
+      return { ok: false, poll, error: "This ballot is out of date. Choose again using the updated poll." };
+    }
+
+    const optionIndex = poll.options.findIndex((option) => option.nominationId === nominationId);
+    const selectedOption = poll.options[optionIndex];
+    if (!selectedOption) return { ok: false, poll, error: "That nomination is no longer available. Choose again using the updated poll." };
+
+    const currentVote = poll.votes?.[userId];
+    const vote = rankKey
+      ? { ...(isRankedPollVote(currentVote) ? currentVote : {}), [rankKey]: optionIndex }
+      : optionIndex;
+    const updatedPoll = await polls.findOneAndUpdate(
+      {
+        ...openPollFilter(pollId, guildId),
+        // A nomination edit/removal must not shift the meaning of this stored index.
+        options: poll.options,
+        ...(rankKey ? { [`votes.${userId}`]: currentVote === undefined ? { $exists: false } : currentVote } : {}),
+      },
+      { $set: { [`votes.${userId}`]: vote, updatedAt: new Date() } },
+      { returnDocument: "after" },
+    );
+    if (updatedPoll) return { ok: true, poll: updatedPoll, selectedOption };
+    // A concurrent rank edit or nomination change won. Re-read before trying again.
+  }
+
+  return { ok: false, error: "The poll changed while saving your vote. Please choose again." };
+}
+
 export async function handleBookPollVote(interaction: ButtonInteraction) {
-  const [, , pollId, optionIndexText, pageText] = interaction.customId.split(":");
-  const optionIndex = Number(optionIndexText);
+  const [, , pollId, nominationId, pageText] = interaction.customId.split(":");
   const page = Number(pageText ?? 0);
 
-  if (!pollId || !Number.isInteger(optionIndex) || !Number.isInteger(page)) {
+  if (!pollId || !nominationId || !Number.isInteger(page)) {
     await interaction.reply({ content: "That poll vote button is invalid.", flags: MessageFlags.Ephemeral });
     return;
   }
 
-  const { polls } = getBookClubCollections();
-  const poll = await polls.findOne({ pollId, guildId: interaction.guildId });
-
-  if (!poll || poll.status !== "active") {
-    await interaction.reply({ content: "That poll is no longer active.", flags: MessageFlags.Ephemeral });
-    return;
-  }
-
-  if (getPollType(poll) !== "regular") {
-    await interaction.reply({ content: "Use the ranking menus for this ranked poll.", flags: MessageFlags.Ephemeral });
-    return;
-  }
-
-  const selectedOption = poll.options[optionIndex];
-  if (!selectedOption) {
-    await interaction.reply({ content: "That book is not part of this poll.", flags: MessageFlags.Ephemeral });
-    return;
-  }
-
-  await polls.updateOne(
-    { pollId, guildId: interaction.guildId },
-    {
-      $set: {
-        [`votes.${interaction.user.id}`]: optionIndex,
-        updatedAt: new Date(),
-      },
-    },
-  );
-
-  const updatedPoll = await polls.findOne({ pollId, guildId: interaction.guildId });
-  if (updatedPoll) {
-    await interaction.update({
-      embeds: [buildPollEmbed(updatedPoll, page)],
-      components: buildPollComponents(updatedPoll, false, page),
-    });
-
-    await interaction.followUp({
-      content: `Your vote for **${formatBookTitle(selectedOption.title, selectedOption.author)}** is counted.`,
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  await interaction.reply({
-    content: `Your vote for **${formatBookTitle(selectedOption.title, selectedOption.author)}** is counted.`,
-    flags: MessageFlags.Ephemeral,
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const result = await savePollVote(pollId, interaction.guildId, interaction.user.id, nominationId);
+  await interaction.editReply({
+    content: result.ok
+      ? `Your vote for **${formatBookTitle(result.selectedOption.title, result.selectedOption.author)}** is counted.`
+      : result.error,
   });
+  if (result.poll) await refreshPollMessage(interaction.client, result.poll, page);
 }
 
 export async function handleBookPollRankOpen(interaction: ButtonInteraction) {
@@ -601,8 +634,8 @@ export async function handleBookPollRankOpen(interaction: ButtonInteraction) {
   const { polls } = getBookClubCollections();
   const poll = await polls.findOne({ pollId, guildId: interaction.guildId });
 
-  if (!poll || poll.status !== "active") {
-    await interaction.reply({ content: "That poll is no longer active.", flags: MessageFlags.Ephemeral });
+  if (!poll || !isPollOpen(poll)) {
+    await interaction.reply({ content: "Voting has ended for this poll.", flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -620,13 +653,14 @@ export async function handleBookPollRankOpen(interaction: ButtonInteraction) {
 export async function handleBookPollRank(interaction: StringSelectMenuInteraction) {
   const [, , pollId, rankIndexText, pageText] = interaction.customId.split(":");
   const rankIndex = Number(rankIndexText);
-  const optionIndex = Number(interaction.values[0]);
+  const nominationId = interaction.values[0];
   const page = Number(pageText);
 
   if (
     !pollId ||
     !Number.isInteger(rankIndex) ||
-    !Number.isInteger(optionIndex) ||
+    !nominationId ||
+    interaction.values.length !== 1 ||
     !Number.isInteger(page) ||
     !RANK_KEYS[rankIndex]
   ) {
@@ -634,70 +668,27 @@ export async function handleBookPollRank(interaction: StringSelectMenuInteractio
     return;
   }
 
-  const { polls } = getBookClubCollections();
-  const poll = await polls.findOne({ pollId, guildId: interaction.guildId });
+  if (isEphemeralMessageInteraction(interaction)) await interaction.deferUpdate();
+  else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  if (!poll || poll.status !== "active") {
-    await interaction.reply({ content: "That poll is no longer active.", flags: MessageFlags.Ephemeral });
-    return;
+  const result = await savePollVote(pollId, interaction.guildId, interaction.user.id, nominationId, RANK_KEYS[rankIndex]);
+  const poll = result.poll;
+  if (!result.ok) {
+    await interaction.editReply(poll && getPollType(poll) === "ranked"
+      ? buildPrivateRankedBallot(poll, page, interaction.user.id, result.error)
+      : { content: result.error });
+  } else {
+    const { poll: savedPoll, selectedOption } = result;
+    const rankedVote = getRankedVoteForUser(savedPoll, interaction.user.id) ?? {};
+    const status = hasDuplicateRankedChoices(rankedVote)
+      ? " Your ballot does not count yet. Pick three different books before the poll closes."
+      : isCompleteRankedVote(rankedVote, savedPoll.options.length)
+        ? " Your ranked ballot is complete."
+        : " Your ballot does not count yet. Choose your remaining ranked picks before the poll closes.";
+    await interaction.editReply(buildPrivateRankedBallot(savedPoll, page, interaction.user.id,
+      `Your #${rankIndex + 1} choice is **${formatBookTitle(selectedOption.title, selectedOption.author)}**.${status}`));
   }
-
-  if (getPollType(poll) !== "ranked") {
-    await interaction.reply({ content: "Use the vote buttons for this regular poll.", flags: MessageFlags.Ephemeral });
-    return;
-  }
-
-  const selectedOption = poll.options[optionIndex];
-  if (!selectedOption) {
-    await interaction.reply({ content: "That book is not part of this poll.", flags: MessageFlags.Ephemeral });
-    return;
-  }
-
-  const currentVote = poll.votes?.[interaction.user.id];
-  const rankedVote: RankedPollVote = isRankedPollVote(currentVote) ? { ...currentVote } : {};
-  rankedVote[RANK_KEYS[rankIndex]] = optionIndex;
-
-  await polls.updateOne(
-    { pollId, guildId: interaction.guildId },
-    {
-      $set: {
-        [`votes.${interaction.user.id}`]: rankedVote,
-        updatedAt: new Date(),
-      },
-    },
-  );
-
-  const updatedPoll = await polls.findOne({ pollId, guildId: interaction.guildId });
-  if (updatedPoll) {
-    const duplicateWarning = hasDuplicateRankedChoices(rankedVote)
-      ? " Pick three different books before the poll closes."
-      : "";
-    const completionText = isCompleteRankedVote(rankedVote, updatedPoll.options.length)
-      ? " Your ranked ballot is complete."
-      : " Choose your remaining ranked picks to complete your ballot.";
-    const content = `Your #${rankIndex + 1} choice is **${formatBookTitle(
-      selectedOption.title,
-      selectedOption.author,
-    )}**.${duplicateWarning || completionText}`;
-    const privateBallot = buildPrivateRankedBallot(updatedPoll, page, interaction.user.id, content);
-
-    if (isEphemeralMessageInteraction(interaction)) {
-      await interaction.update(privateBallot);
-    } else {
-      await interaction.reply({
-        ...privateBallot,
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-
-    await refreshPublicPollMessage(interaction, updatedPoll, page);
-    return;
-  }
-
-  await interaction.reply({
-    content: `Your #${rankIndex + 1} choice is **${formatBookTitle(selectedOption.title, selectedOption.author)}**.`,
-    flags: MessageFlags.Ephemeral,
-  });
+  if (poll) await refreshPollMessage(interaction.client, poll, page);
 }
 
 export async function handleBookPollPage(interaction: ButtonInteraction) {
@@ -712,8 +703,8 @@ export async function handleBookPollPage(interaction: ButtonInteraction) {
   const { polls } = getBookClubCollections();
   const poll = await polls.findOne({ pollId, guildId: interaction.guildId });
 
-  if (!poll || poll.status !== "active") {
-    await interaction.reply({ content: "That poll is no longer active.", flags: MessageFlags.Ephemeral });
+  if (!poll || !isPollOpen(poll)) {
+    await interaction.reply({ content: "Voting has ended for this poll.", flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -722,8 +713,6 @@ export async function handleBookPollPage(interaction: ButtonInteraction) {
     return;
   }
 
-  await interaction.update({
-    embeds: [buildPollEmbed(poll, page)],
-    components: buildPollComponents(poll, false, page),
-  });
+  await interaction.deferUpdate();
+  await refreshPollMessage(interaction.client, poll, page);
 }
