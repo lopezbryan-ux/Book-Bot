@@ -9,6 +9,7 @@ const { execute } = await import("../dist/commands/book-reviews.js");
 const {
   buildBookReviewsMessage,
   handleBookReviewsBook,
+  handleBookReviewsPage,
   invalidateRatingViewsCache,
 } = await import("../dist/rating-views.js");
 
@@ -24,10 +25,11 @@ const books = ["First Book", "Middle Book", "The Cipher"].map((title, index) => 
 }));
 let availableBooks = books;
 let ratingsPerBook = 1;
+let ratingCountsByTitle = new Map();
 
 function matches(document, query) {
   return Object.entries(query).every(([key, value]) => {
-    if (key === "_id") return document._id.equals(value);
+    if (key === "_id") return document._id?.equals(value) ?? false;
     if (value && typeof value === "object" && "$in" in value) {
       return value.$in.includes(document[key]);
     }
@@ -48,9 +50,9 @@ function cursor(documents) {
 const collection = {
   documents() {
     return [...availableBooks, ...availableBooks.flatMap((book) =>
-      Array.from({ length: ratingsPerBook }, (_, index) => ({
+      Array.from({ length: ratingCountsByTitle.get(book.normalizedTitle) ?? ratingsPerBook }, (_, index) => ({
         documentType: "rating",
-        guildId,
+        guildId: book.guildId,
         normalizedTitle: book.normalizedTitle,
         username: `Reader ${index + 1}`,
         rating: 8,
@@ -84,6 +86,7 @@ before(() => {
 beforeEach(() => {
   availableBooks = books;
   ratingsPerBook = 1;
+  ratingCountsByTitle = new Map();
   invalidateRatingViewsCache(guildId);
 });
 after(async () => {
@@ -130,12 +133,108 @@ test("review pagination and book navigation have unique IDs together", async () 
   }
 });
 
-test("a single reviewed book omits book navigation", async () => {
-  availableBooks = [books[2]];
-  const message = await buildBookReviewsMessage(guildId, books[2]._id.toString(), 0);
-  assert.equal(message.components.length, 0);
-  assert.equal(message.totalRatings, 1);
-  assertValidButtons(message);
+for (const count of [0, 1]) {
+  test(`a single club book with ${count} reviews omits book navigation`, async () => {
+    availableBooks = [books[2]];
+    ratingsPerBook = count;
+    const message = await buildBookReviewsMessage(guildId, books[2]._id.toString(), 0);
+    assert.equal(message.components.length, 0);
+    assert.equal(message.totalRatings, count);
+    assert.equal(message.embeds[0].data.title, books[2].title);
+    if (count === 0) assert.match(message.embeds[0].data.description, /No reviews yet\./);
+    assertValidButtons(message);
+  });
+}
+
+test("/book-reviews shows the book card and navigation when no books have reviews", async () => {
+  ratingsPerBook = 0;
+  availableBooks = books.map((book) => ({ ...book, imageUrl: "https://example.com/cover.jpg" }));
+  for (const [index, book] of availableBooks.entries()) {
+    let message;
+    await execute({
+      guildId,
+      options: { getString: () => book.normalizedTitle },
+      async deferReply() {},
+      async editReply(reply) { message = reply; },
+    });
+    const embed = message.embeds[0].data;
+    assert.equal(embed.title, book.title);
+    assert.equal(embed.description, `by **${book.author}**\nNo reviews yet.`);
+    assert.equal(embed.thumbnail.url, book.imageUrl);
+    assert.equal(embed.fields?.length ?? 0, 0);
+    assert.match(embed.footer.text, new RegExp(`Book ${index + 1} of 3`));
+    assert.equal(message.components.length, 1);
+    const [navigation] = assertValidButtons(message);
+    assert.equal(navigation.components[0].disabled, index === 0);
+    assert.equal(navigation.components[2].disabled, index === availableBooks.length - 1);
+  }
+});
+
+test("book navigation includes unreviewed books and stays within the current server", async () => {
+  availableBooks = [...books, {
+    ...books[0],
+    _id: new ObjectId("000000000000000000000004"),
+    guildId: "other-server",
+  }];
+  ratingCountsByTitle.set(books[1].normalizedTitle, 0);
+  const message = await buildBookReviewsMessage(guildId, books[0]._id.toString(), 0);
+  const [navigation] = assertValidButtons(message);
+  let reply;
+  await handleBookReviewsBook({
+    guildId,
+    customId: navigation.components[2].custom_id,
+    async deferUpdate() {},
+    async editReply(message) { reply = message; },
+  });
+  assert.equal(reply.embeds[0].data.title, books[1].title);
+  assert.match(reply.embeds[0].data.description, /No reviews yet\./);
+  const [unreviewedNavigation] = assertValidButtons(reply);
+  assert.equal(unreviewedNavigation.components[1].label, "2/3 Books");
+  for (const [buttonIndex, bookIndex] of [[0, 0], [2, 2]]) {
+    await handleBookReviewsBook({
+      guildId,
+      customId: unreviewedNavigation.components[buttonIndex].custom_id,
+      async deferUpdate() {},
+      async editReply(message) { reply = message; },
+    });
+    assert.equal(reply.embeds[0].data.title, books[bookIndex].title);
+    assert.match(reply.embeds[0].data.description, /Club average: \*\*8\.0\/10\*\* from 1 rating/);
+    assertValidButtons(reply);
+  }
+});
+
+test("existing review page buttons still show the book after its last review is removed", async () => {
+  ratingsPerBook = 4;
+  const message = await buildBookReviewsMessage(guildId, books[0]._id.toString(), 0);
+  const [reviews] = assertValidButtons(message);
+  ratingsPerBook = 0;
+  invalidateRatingViewsCache(guildId);
+  let reply;
+  await handleBookReviewsPage({
+    guildId,
+    customId: reviews.components[2].custom_id,
+    async deferUpdate() {},
+    async editReply(message) { reply = message; },
+  });
+  assert.equal(reply.embeds[0].data.title, books[0].title);
+  assert.match(reply.embeds[0].data.description, /No reviews yet\./);
+  assert.equal(reply.embeds[0].data.fields?.length ?? 0, 0);
+  assert.equal(reply.components.length, 1);
+  assertValidButtons(reply);
+});
+
+test("book navigation still reports a deleted book", async () => {
+  availableBooks = [books[0], books[2]];
+  let reply;
+  await handleBookReviewsBook({
+    guildId,
+    customId: `book-reviews-book:${books[1]._id}:next`,
+    async deferUpdate() {},
+    async editReply(message) { reply = message; },
+  });
+  assert.equal(reply.content, "That book could not be found anymore.");
+  assert.deepEqual(reply.embeds, []);
+  assert.deepEqual(reply.components, []);
 });
 
 test("book navigation buttons still load the intended book", async () => {

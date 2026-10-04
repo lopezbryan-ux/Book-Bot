@@ -69,9 +69,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   await interaction.deferReply();
 
   const message = await buildBookReviewsMessage(interaction.guildId, book._id.toString(), 0);
-  if (message.totalRatings === 0) {
+  if (!message.book) {
     await interaction.editReply({
-      content: `No one has rated **${formatBookTitle(book.title, book.author)}** yet.`,
+      content: "That book could not be found anymore.",
     });
     return;
   }
