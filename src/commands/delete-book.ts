@@ -1,5 +1,5 @@
 import { AutocompleteInteraction, ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
-import { formatBookTitle, getBookClubCollections, normalizeTitle } from "../book-club.js";
+import { findBookByInput, formatBookTitle, getBookClubCollections } from "../book-club.js";
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "../mongo.js";
 import { invalidateRatingViewsCache } from "../rating-views.js";
 
@@ -44,7 +44,7 @@ export async function autocomplete(interaction: AutocompleteInteraction) {
   await interaction.respond(
     availableBooks.map((book) => ({
       name: truncateChoiceValue(formatBookTitle(book.title, book.author)),
-      value: truncateChoiceValue(book.normalizedTitle),
+      value: book._id.toString(),
     })),
   );
 }
@@ -52,11 +52,7 @@ export async function autocomplete(interaction: AutocompleteInteraction) {
 export async function execute(interaction: ChatInputCommandInteraction) {
   const titleInput = interaction.options.getString("title", true).trim();
   const { books } = getBookClubCollections();
-  const book = await books.findOne({
-    documentType: "book",
-    guildId: interaction.guildId,
-    normalizedTitle: normalizeTitle(titleInput),
-  });
+  const book = await findBookByInput(interaction.guildId, titleInput);
 
   if (!book) {
     await interaction.reply({
@@ -70,7 +66,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const ratingCount = await ratings.countDocuments({
     documentType: "rating",
     guildId: interaction.guildId,
-    normalizedTitle: book.normalizedTitle,
+    bookId: book._id,
   });
 
   if (ratingCount > 0) {
@@ -86,7 +82,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   await books.deleteOne({
     documentType: "book",
     guildId: interaction.guildId,
-    normalizedTitle: book.normalizedTitle,
+    _id: book._id,
   });
   invalidateRatingViewsCache(interaction.guildId);
 

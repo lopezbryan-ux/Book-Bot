@@ -8,6 +8,7 @@ import {
 } from "discord.js";
 import { ObjectId } from "mongodb";
 import { getBookClubCollections } from "./book-club.js";
+import { type RatingDocument } from "./book-ratings.js";
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "./mongo.js";
 
 const RATING_LIST_PREFIX = "rating-list";
@@ -18,21 +19,8 @@ const RATINGS_PER_PAGE = 1;
 const LEADERBOARD_BOOKS_PER_PAGE = 5;
 const BOOK_REVIEWS_PER_PAGE = 3;
 
-interface RatingDocument {
-  documentType: "rating";
-  guildId: string | null;
-  userId: string;
-  username: string;
-  normalizedTitle: string;
-  bookTitle: string;
-  author: string | null;
-  rating: number;
-  review: string | null;
-  updatedAt: Date;
-}
-
 interface BookLeaderboardEntry {
-  _id: string;
+  _id: ObjectId;
   bookTitle: string;
   author: string | null;
   averageRating: number;
@@ -168,7 +156,7 @@ export function isBookReviewsBookCustomId(customId: string) {
   return customId.startsWith(`${BOOK_REVIEWS_BOOK_PREFIX}:`);
 }
 
-export async function getBookRatingSummary(guildId: string | null, normalizedTitle: string) {
+export async function getBookRatingSummary(guildId: string | null, bookId: ObjectId) {
   const ratings = mongoClient.db(BOOK_BOT_DB_NAME).collection<RatingDocument>(BOOK_BOT_COLLECTION_NAME);
   const result = await ratings
     .aggregate<{ averageRating: number; ratingCount: number }>([
@@ -176,7 +164,7 @@ export async function getBookRatingSummary(guildId: string | null, normalizedTit
         $match: {
           documentType: "rating",
           guildId,
-          normalizedTitle,
+          bookId,
         },
       },
       {
@@ -203,7 +191,7 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
     userId,
   });
   const bookAverageResults = await ratings
-    .aggregate<{ _id: string; averageRating: number; ratingCount: number }>([
+    .aggregate<{ _id: ObjectId; averageRating: number; ratingCount: number }>([
       {
         $match: {
           documentType: "rating",
@@ -212,16 +200,16 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
       },
       {
         $group: {
-          _id: "$normalizedTitle",
+          _id: "$bookId",
           averageRating: { $avg: "$rating" },
           ratingCount: { $sum: 1 },
         },
       },
     ])
     .toArray();
-  const bookAveragesByTitle = new Map(
+  const bookAveragesById = new Map(
     bookAverageResults.map((result) => [
-      result._id,
+      result._id.toString(),
       {
         averageRating: result.averageRating,
         ratingCount: result.ratingCount,
@@ -246,13 +234,13 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
     .find({
       documentType: "book",
       guildId,
-      normalizedTitle: { $in: pageRatings.map((rating) => rating.normalizedTitle) },
+      _id: { $in: pageRatings.map((rating) => rating.bookId) },
     })
     .toArray();
-  const booksByTitle = new Map(bookDocs.map((book) => [book.normalizedTitle, book]));
+  const booksById = new Map(bookDocs.map((book) => [book._id.toString(), book]));
 
   const currentRating = pageRatings[0];
-  const currentBook = currentRating ? booksByTitle.get(currentRating.normalizedTitle) : null;
+  const currentBook = currentRating ? booksById.get(currentRating.bookId.toString()) : null;
   const currentTitle = currentRating ? currentBook?.title ?? currentRating.bookTitle : "Reading Ratings";
   const currentAuthor = currentRating ? currentBook?.author ?? currentRating.author : null;
 
@@ -263,15 +251,14 @@ export async function buildRatingListMessage(guildId: string | null, userId: str
     .setFooter({ text: `Rating ${safePage + 1} of ${totalRatings}` })
     .setTimestamp();
 
-  const firstCover = pageRatings.map((rating) => booksByTitle.get(rating.normalizedTitle)?.imageUrl).find(Boolean);
+  const firstCover = pageRatings.map((rating) => booksById.get(rating.bookId.toString())?.imageUrl).find(Boolean);
   if (firstCover) {
     embed.setImage(firstCover);
   }
 
   for (const rating of pageRatings) {
-    const book = booksByTitle.get(rating.normalizedTitle);
     const ratingDisplay = formatRating(rating.rating);
-    const bookAverage = bookAveragesByTitle.get(rating.normalizedTitle);
+    const bookAverage = bookAveragesById.get(rating.bookId.toString());
     const averageText = bookAverage
       ? `\nClub average: **${bookAverage.averageRating.toFixed(1)}/10** from ${bookAverage.ratingCount} rating${
           bookAverage.ratingCount === 1 ? "" : "s"
@@ -333,7 +320,7 @@ async function loadBookLeaderboardEntries(
       },
       {
         $group: {
-          _id: "$normalizedTitle",
+          _id: "$bookId",
           bookTitle: { $first: "$bookTitle" },
           author: { $first: "$author" },
           averageRating: { $avg: "$rating" },
@@ -362,13 +349,13 @@ async function loadBookLeaderboardEntries(
     .find({
       documentType: "book",
       guildId,
-      normalizedTitle: { $in: leaderboardEntries.map((entry) => entry._id) },
+      _id: { $in: leaderboardEntries.map((entry) => entry._id) },
     })
     .toArray();
-  const booksByTitle = new Map(bookDocs.map((book) => [book.normalizedTitle, book]));
+  const booksById = new Map(bookDocs.map((book) => [book._id.toString(), book]));
 
   return leaderboardEntries.map((entry) => {
-    const book = booksByTitle.get(entry._id);
+    const book = booksById.get(entry._id.toString());
     return {
       ...entry,
       title: book?.title ?? entry.bookTitle,
@@ -541,7 +528,7 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
   const ratingsQuery = {
     documentType: "rating" as const,
     guildId,
-    normalizedTitle: book.normalizedTitle,
+    bookId: book._id,
   };
   const totalRatings = await ratings.countDocuments(ratingsQuery);
   const totalPages = Math.max(1, Math.ceil(totalRatings / BOOK_REVIEWS_PER_PAGE));
@@ -553,7 +540,7 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
       .skip(safePage * BOOK_REVIEWS_PER_PAGE)
       .limit(BOOK_REVIEWS_PER_PAGE)
       .toArray(),
-    getBookRatingSummary(guildId, book.normalizedTitle),
+    getBookRatingSummary(guildId, book._id),
     getBookNavigation(guildId),
   ]);
   const currentBookIndex = navigationBooks.findIndex((book) => book.bookId === bookId);

@@ -29,10 +29,10 @@ let ratingCountsByTitle = new Map();
 
 function matches(document, query) {
   return Object.entries(query).every(([key, value]) => {
-    if (key === "_id") return document._id?.equals(value) ?? false;
     if (value && typeof value === "object" && "$in" in value) {
-      return value.$in.includes(document[key]);
+      return value.$in.some((item) => item instanceof ObjectId ? item.equals(document[key]) : item === document[key]);
     }
+    if (value instanceof ObjectId) return document[key]?.equals(value) ?? false;
     return document[key] === value;
   });
 }
@@ -52,8 +52,9 @@ const collection = {
     return [...availableBooks, ...availableBooks.flatMap((book) =>
       Array.from({ length: ratingCountsByTitle.get(book.normalizedTitle) ?? ratingsPerBook }, (_, index) => ({
         documentType: "rating",
+        bookId: book._id,
         guildId: book.guildId,
-        normalizedTitle: book.normalizedTitle,
+        normalizedTitle: book.originalNormalizedTitle ?? book.normalizedTitle,
         username: `Reader ${index + 1}`,
         rating: 8,
         review: "A test review.",

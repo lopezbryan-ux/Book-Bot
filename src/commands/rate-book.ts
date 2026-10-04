@@ -1,6 +1,6 @@
 import { AutocompleteInteraction, ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { buildBookRatingEmbed } from '../book-embeds.js';
-import { formatBookTitle, getBookClubCollections, normalizeTitle } from '../book-club.js';
+import { findBookByInput, formatBookTitle, getBookClubCollections } from '../book-club.js';
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from '../mongo.js';
 import { invalidateRatingViewsCache } from '../rating-views.js';
 
@@ -60,7 +60,7 @@ export async function autocomplete(interaction: AutocompleteInteraction) {
   await interaction.respond(
     availableBooks.map((book) => ({
       name: truncateChoiceValue(formatBookTitle(book.title, book.author)),
-      value: truncateChoiceValue(book.normalizedTitle),
+      value: book._id.toString(),
     })),
   );
 }
@@ -71,13 +71,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const rating = Math.round(ratingInput * 10) / 10;
   const review = interaction.options.getString('review')?.trim();
 
-  const { books } = getBookClubCollections();
-  const normalizedTitle = normalizeTitle(titleInput);
-  const book = await books.findOne({
-    documentType: 'book',
-    guildId: interaction.guildId,
-    normalizedTitle,
-  });
+  const book = await findBookByInput(interaction.guildId, titleInput);
 
   if (!book) {
     await interaction.reply({
@@ -92,15 +86,17 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   await ratings.updateOne(
     {
+      documentType: 'rating',
       guildId: interaction.guildId,
       userId: interaction.user.id,
-      normalizedTitle: book.normalizedTitle,
+      bookId: book._id,
     },
     {
       $set: {
         bookTitle: book.title,
         author: book.author,
         documentType: 'rating',
+        bookId: book._id,
         normalizedTitle: book.normalizedTitle,
         rating,
         review: review || null,
@@ -131,4 +127,3 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     ],
   });
 }
-

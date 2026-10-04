@@ -18,7 +18,7 @@ let transactionCount;
 function matches(document, query) {
   return Object.entries(query).every(([key, value]) => {
     if (key === "$or") return value.some((condition) => matches(document, condition));
-    if (key === "_id") return document._id?.equals(value) ?? false;
+    if (value instanceof ObjectId) return document[key]?.equals(value) ?? false;
     if (value && typeof value === "object" && "$regex" in value) {
       return new RegExp(value.$regex, value.$options).test(document[key] ?? "");
     }
@@ -37,8 +37,8 @@ const collection = {
     const document = documents.find((document) => matches(document, query));
     return document ? { ...document } : null;
   },
-  find(query) {
-    record("find");
+  find(query, options) {
+    record("find", options);
     let result = documents.filter((document) => matches(document, query));
     return {
       collation() { return this; },
@@ -93,6 +93,7 @@ beforeEach(() => {
   };
   const rating = {
     documentType: "rating",
+    bookId,
     guildId,
     normalizedTitle: book.normalizedTitle,
     bookTitle: book.title,
@@ -110,8 +111,8 @@ beforeEach(() => {
     { ...book, _id: otherGuildBookId, guildId: "other-server" },
     rating,
     { ...rating, userId: "reader-2", rating: 7 },
-    { ...rating, normalizedTitle: "another book", bookTitle: "Another Book" },
-    { ...rating, guildId: "other-server" },
+    { ...rating, bookId: otherBookId, normalizedTitle: "another book", bookTitle: "Another Book" },
+    { ...rating, bookId: otherGuildBookId, guildId: "other-server" },
   ];
   operations = [];
   interaction = null;

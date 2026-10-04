@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { mongoClient } from './mongo.js';
+import { ensureRatingBookIdIndex } from './book-ratings.js';
 import { closeOverdueBookPolls } from './poll-closing.js';
 import {
   handleBookPollPage,
@@ -105,6 +106,7 @@ function getCommand(commandModule: Record<string, unknown>): Command | undefined
 }
 
 (async () => {
+  await ensureRatingBookIdIndex();
   const commandsPath = path.join(__dirname, 'commands');
   const commandFiles = getAllCommandFiles(commandsPath);
 

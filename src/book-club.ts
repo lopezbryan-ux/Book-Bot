@@ -1,3 +1,4 @@
+import { ObjectId, type ClientSession } from "mongodb";
 import {
   BOOK_BOT_COLLECTION_NAME,
   BOOK_BOT_DB_NAME,
@@ -105,4 +106,20 @@ export function getBookClubCollections() {
     nominations: db.collection<NominationDocument>(BOOK_NOMINATIONS_COLLECTION_NAME),
     polls: db.collection<PollDocument>(BOOK_POLLS_COLLECTION_NAME),
   };
+}
+
+export async function findBookByInput(guildId: string | null, input: string, session?: ClientSession) {
+  const { books } = getBookClubCollections();
+  const titleInput = input.trim();
+  const scope = { documentType: "book" as const, guildId };
+  const options = session ? { session } : {};
+  if (ObjectId.isValid(titleInput)) {
+    return books.findOne({ ...scope, _id: new ObjectId(titleInput) }, options);
+  }
+
+  // Manually typed titles are a search convenience; ambiguous titles must be
+  // selected through autocomplete, whose values contain the stable book ID.
+  const matches = await books.find({ ...scope, normalizedTitle: normalizeTitle(titleInput) }, options)
+    .limit(2).toArray();
+  return matches.length === 1 ? matches[0] : null;
 }

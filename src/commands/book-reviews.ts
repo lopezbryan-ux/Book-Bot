@@ -1,5 +1,5 @@
 import { AutocompleteInteraction, ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
-import { formatBookTitle, getBookClubCollections, normalizeTitle } from "../book-club.js";
+import { findBookByInput, formatBookTitle, getBookClubCollections } from "../book-club.js";
 import { buildBookReviewsMessage } from "../rating-views.js";
 
 export const data = new SlashCommandBuilder()
@@ -43,20 +43,14 @@ export async function autocomplete(interaction: AutocompleteInteraction) {
   await interaction.respond(
     availableBooks.map((book) => ({
       name: truncateChoiceValue(formatBookTitle(book.title, book.author)),
-      value: truncateChoiceValue(book.normalizedTitle),
+      value: book._id.toString(),
     })),
   );
 }
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   const titleInput = interaction.options.getString("title", true).trim();
-  const { books } = getBookClubCollections();
-  const normalizedTitle = normalizeTitle(titleInput);
-  const book = await books.findOne({
-    documentType: "book",
-    guildId: interaction.guildId,
-    normalizedTitle,
-  });
+  const book = await findBookByInput(interaction.guildId, titleInput);
 
   if (!book) {
     await interaction.reply({

@@ -1,7 +1,6 @@
 import { AutocompleteInteraction, ChatInputCommandInteraction, MessageFlags, SlashCommandBuilder } from "discord.js";
-import { ObjectId } from "mongodb";
 import { buildBookAddedEmbed } from "../book-embeds.js";
-import { formatBookTitle, getBookClubCollections, getImageUrlOrNull, normalizeTitle } from "../book-club.js";
+import { findBookByInput, formatBookTitle, getBookClubCollections, getImageUrlOrNull } from "../book-club.js";
 import { BOOK_BOT_COLLECTION_NAME, BOOK_BOT_DB_NAME, mongoClient } from "../mongo.js";
 import { invalidateRatingViewsCache } from "../rating-views.js";
 
@@ -92,12 +91,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const result = await mongoClient.withSession((session) =>
     session.withTransaction(async () => {
       const bookFilter = { documentType: "book" as const, guildId: interaction.guildId };
-      // Autocomplete uses the stable book ID; a manually entered title works too.
-      const selectedBook = ObjectId.isValid(titleInput)
-        ? await books.findOne({ ...bookFilter, _id: new ObjectId(titleInput) }, { session })
-        : null;
-      const book = selectedBook ??
-        await books.findOne({ ...bookFilter, normalizedTitle: normalizeTitle(titleInput) }, { session });
+      const book = await findBookByInput(interaction.guildId, titleInput, session);
 
       if (!book) {
         return { error: "That book is not in the club book list." };
@@ -120,7 +114,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       if (authorChanged) {
         // Preserve each member's score, review, and original rating timestamps.
         await ratings.updateMany(
-          { documentType: "rating", guildId: interaction.guildId, normalizedTitle: book.normalizedTitle },
+          { documentType: "rating", guildId: interaction.guildId, bookId: book._id },
           { $set: { author } },
           { session },
         );
