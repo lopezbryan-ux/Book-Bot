@@ -48,6 +48,14 @@ pm2 logs book-bot --lines 50 --nostream
 
 Confirm the latest startup completed the build, printed `Successfully reloaded application (/) commands.`, and reached `Ready! Logged in as ...`. PM2 reporting `online` alone does not confirm startup finished. Distinguish older log errors from errors produced by this restart. If startup fails, inspect the failing step before restarting again.
 
+## Daily availability
+
+- **Shutdown: 2:00 AM every day, America/Chicago (Central Time).** Verified in root's crontab: `0 2 * * * /sbin/shutdown -h now`. This shuts down the Raspberry Pi host and takes Book Bot offline.
+- **Morning power-on: 7:00 AM every day, America/Chicago (Central Time).** The smart plug turns on at this time, as confirmed by the user. The host's cron jobs do not control morning power-on.
+- **Bot startup after power-on:** the enabled `pm2-lopezb123.service` runs `pm2 resurrect` at boot, restoring the saved processes. Book Bot becomes available after boot and its build, command registration, and Discord login complete.
+
+Expect Book Bot to be offline from 2:00 AM Central until startup completes after the plug turns on at 7:00 AM Central. A PM2 restart cannot turn on a powered-off host.
+
 ## First start only
 
 When no `book-bot` PM2 process exists:
