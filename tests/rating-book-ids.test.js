@@ -28,6 +28,7 @@ function equal(left, right) {
 function matches(document, query) {
   return Object.entries(query).every(([key, value]) => {
     if (key === "$or") return value.some((condition) => matches(document, condition));
+    if (value && typeof value === "object" && "$ne" in value) return !equal(value.$ne, document[key]);
     if (value && typeof value === "object" && "$in" in value) return value.$in.some((item) => equal(item, document[key]));
     if (value && typeof value === "object" && "$regex" in value) return new RegExp(value.$regex, value.$options).test(document[key] ?? "");
     if (value && typeof value === "object" && "$gte" in value) return document[key] >= value.$gte;
@@ -214,6 +215,24 @@ test("reviews, individual ratings, averages, and rating lists use IDs after titl
   assert.equal(list.embeds[0].data.title, "Shared Title");
   assert.equal(list.embeds[0].data.image.url, "https://example.com/first.jpg");
   assert.match(list.embeds[0].data.fields[0].value, /Club average: \*\*8\.0\/10\*\* from 2 ratings/);
+});
+
+test("renaming through update-book keeps reviews, rating lists, and leaderboards attached", async () => {
+  const originalRatings = documents.filter((document) => document.documentType === "rating").map((rating) => ({ ...rating }));
+  await execute("update-book", { title: bookId.toString(), "new-title": "Corrected Book Title" });
+  assert.deepEqual(documents.filter((document) => document.documentType === "rating"), originalRatings.map((rating) =>
+    rating.bookId.equals(bookId) && rating.guildId === guildId
+      ? { ...rating, bookTitle: "Corrected Book Title", normalizedTitle: "corrected book title" }
+      : rating));
+  const reviews = await execute("book-reviews", { title: bookId.toString() });
+  assert.equal(reviews.embeds[0].data.title, "Corrected Book Title");
+  assert.equal(reviews.embeds[0].data.fields.length, 2);
+  assert.deepEqual(await getBookRatingSummary(guildId, bookId), { averageRating: 8, ratingCount: 2 });
+  const list = await buildRatingListMessage(guildId, member.id, member.toString(), 0);
+  assert.equal(list.embeds[0].data.title, "Corrected Book Title");
+  const leaderboard = await buildBookLeaderboardMessage(guildId, 0);
+  assert.equal(leaderboard.totalBooks, 2);
+  assert.ok(leaderboard.embeds[0].data.fields.some((field) => field.name.includes("Corrected Book Title")));
 });
 
 test("leaderboards keep separate books with the same title and use current book metadata", async () => {

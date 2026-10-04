@@ -1,9 +1,11 @@
 # Book-Bot
 Bot for my friends to use to view, store, nominate our books
 
-Use `/update-book` to change an existing book's author or cover image. Choose the book from the `title` suggestions, then provide `author`, `image-url`, or both. Omitted fields keep their current values; the title stays unchanged.
+Use `/update-book` to change an existing book's title, author, or cover image. Choose the book from the `title` suggestions, then provide `new-title`, `author`, `image-url`, or any combination. Omitted fields keep their current values. Title changes preserve the book's ID, ratings, reviews, and rating timestamps.
 
 Example: `/update-book title:The Cipher author:Kathe Koja image-url:https://example.com/cover.jpg`
+
+Rename example: `/update-book title:The Cipher new-title:The Cipher (1991)`
 
 Ratings and reviews reference each book's MongoDB `bookId`. The `title` suggestions display book names and submit stable IDs; an unambiguous manually entered title still works. Correcting book metadata keeps the same review relationship.
 
