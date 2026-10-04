@@ -106,8 +106,8 @@ function buildBookReviewsCustomId(bookId: string, page: number) {
   return `${BOOK_REVIEWS_PREFIX}:${bookId}:${page}`;
 }
 
-function buildBookReviewsBookCustomId(bookId: string) {
-  return `${BOOK_REVIEWS_BOOK_PREFIX}:${bookId}`;
+function buildBookReviewsBookCustomId(bookId: string, role: "previous" | "position" | "next") {
+  return `${BOOK_REVIEWS_BOOK_PREFIX}:${bookId}:${role}`;
 }
 
 function formatRating(ratingValue: unknown) {
@@ -636,17 +636,17 @@ export async function buildBookReviewsMessage(guildId: string | null, bookId: st
       ? [
           new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
-              .setCustomId(buildBookReviewsBookCustomId(previousBook?.bookId ?? bookId))
+              .setCustomId(buildBookReviewsBookCustomId(previousBook?.bookId ?? bookId, "previous"))
               .setLabel("Previous Book")
               .setStyle(ButtonStyle.Primary)
               .setDisabled(!previousBook),
             new ButtonBuilder()
-              .setCustomId(buildBookReviewsBookCustomId(bookId))
+              .setCustomId(buildBookReviewsBookCustomId(bookId, "position"))
               .setLabel(`${currentBookIndex + 1}/${reviewedBooks.length} Books`)
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(true),
             new ButtonBuilder()
-              .setCustomId(buildBookReviewsBookCustomId(nextBook?.bookId ?? bookId))
+              .setCustomId(buildBookReviewsBookCustomId(nextBook?.bookId ?? bookId, "next"))
               .setLabel("Next Book")
               .setStyle(ButtonStyle.Primary)
               .setDisabled(!nextBook),
