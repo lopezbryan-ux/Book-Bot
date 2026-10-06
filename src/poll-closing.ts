@@ -1,4 +1,4 @@
-import { Client, EmbedBuilder } from "discord.js";
+import { AttachmentBuilder, Client, EmbedBuilder } from "discord.js";
 import { formatBookTitle, getBookClubCollections, PollDocument } from "./book-club.js";
 import { getValidPollVotes, getWinningOptions, refreshPollMessage } from "./polls.js";
 import { mongoClient } from "./mongo.js";
@@ -19,6 +19,8 @@ export interface CloseActiveBookPollsResult {
   clearedNominationCount: number;
   summaries: string[];
 }
+
+const MAX_VOTERS_PER_ANNOUNCEMENT = 4;
 
 function buildVoteRevealLines(poll: PollDocument) {
   const lines: string[] = [];
@@ -55,10 +57,65 @@ function buildVoteRevealLines(poll: PollDocument) {
   return lines;
 }
 
-function truncateAnnouncement(content: string, maxLength = 1024) {
-  if (content.length <= maxLength) return content;
+function groupVoteRevealLines(lines: string[]) {
+  const pages: string[] = [];
+  let pageLines: string[] = [];
+  let pageLength = 0;
 
-  return `${content.slice(0, maxLength - 40)}\n...vote list truncated.`;
+  for (const line of lines) {
+    const nextLength = pageLength + (pageLines.length > 0 ? 1 : 0) + line.length;
+    if (pageLines.length > 0 && (pageLines.length >= MAX_VOTERS_PER_ANNOUNCEMENT || nextLength > 1024)) {
+      pages.push(pageLines.join("\n"));
+      pageLines = [];
+      pageLength = 0;
+    }
+    pageLength += (pageLines.length > 0 ? 1 : 0) + line.length;
+    pageLines.push(line);
+  }
+
+  if (pageLines.length > 0) pages.push(pageLines.join("\n"));
+  return pages;
+}
+
+function addAnnouncementSection(embed: EmbedBuilder, name: string, value: string, fileName: string) {
+  if (value.length <= 1024 && embed.length + name.length + value.length <= 6000) {
+    embed.addFields({ name, value });
+    return [];
+  }
+
+  const description = `${embed.data.description ? `${embed.data.description}\n\n` : ""}**${name}**\n${value}`;
+  if (description.length <= 4096 && embed.length - (embed.data.description?.length ?? 0) + description.length <= 6000) {
+    embed.setDescription(description);
+    return [];
+  }
+
+  // Exceptionally long sections stay complete in a text attachment.
+  embed.addFields({ name, value: `See the attached file for the complete ${name.toLowerCase()}.` });
+  return [new AttachmentBuilder(Buffer.from(value, "utf8"), { name: fileName })];
+}
+
+function splitAnnouncement(content: string, maxLength: number) {
+  const chunks: string[] = [];
+
+  while (content.length > maxLength) {
+    // Keep whole ballots together when possible, and retain every character.
+    let end = content.lastIndexOf("\n", maxLength - 1) + 1;
+    if (end === 0) {
+      const lastComma = content.lastIndexOf(", ", maxLength - 2);
+      if (lastComma >= 0) end = lastComma + 2;
+    }
+    if (end === 0) end = content.lastIndexOf(" ", maxLength - 1) + 1;
+    if (end === 0) end = maxLength;
+    // A hard split must not separate the two halves of an emoji.
+    const lastCodeUnit = content.charCodeAt(end - 1);
+    if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) end -= 1;
+
+    chunks.push(content.slice(0, end));
+    content = content.slice(end);
+  }
+
+  if (content) chunks.push(content);
+  return chunks;
 }
 
 function formatPollType(poll: PollDocument) {
@@ -100,8 +157,9 @@ async function announcePollWinner(client: Client, poll: PollDocument, winner: Po
   if (!channel?.isTextBased() || !("send" in channel)) return;
 
   const voteRevealLines = buildVoteRevealLines(poll);
-  const voteRevealText =
-    voteRevealLines.length > 0 ? truncateAnnouncement(voteRevealLines.join("\n")) : "No valid votes were recorded.";
+  const voteRevealPages = voteRevealLines.length > 0
+    ? groupVoteRevealLines(voteRevealLines)
+    : ["No valid votes were recorded."];
 
   const embed = new EmbedBuilder()
     .setColor(0x6f8f72)
@@ -111,7 +169,6 @@ async function announcePollWinner(client: Client, poll: PollDocument, winner: Po
       { name: "Final score", value: scoreText, inline: true },
       { name: "Poll type", value: formatPollType(poll), inline: true },
       { name: "Nominated by", value: `<@${winner.nominatedBy}>`, inline: true },
-      { name: "Votes", value: voteRevealText },
     )
     .setTimestamp();
 
@@ -119,14 +176,46 @@ async function announcePollWinner(client: Client, poll: PollDocument, winner: Po
     embed.setImage(winner.imageUrl);
   }
 
-  await channel.send({
-    content: `@everyone The book poll is over. **${formatBookTitle(winner.title, winner.author)}** won and has been added to the club list.`,
-    embeds: [embed],
-    allowedMentions: {
-      parse: ["everyone"],
-      users: [winner.nominatedBy],
-    },
-  });
+  const { counts } = getWinningOptions(poll);
+  const otherScores = counts.filter((_, index) => poll.options[index].nominationId !== winner.nominationId);
+  const runnerUpScore = otherScores.length > 0 ? Math.max(...otherScores) : null;
+  const runnersUp = poll.options.filter((option, index) =>
+    option.nominationId !== winner.nominationId && counts[index] === runnerUpScore,
+  );
+  const scoreLabel = poll.pollType === "ranked" ? "point" : "vote";
+  const runnerUpText = runnersUp.length > 0
+    ? runnersUp.map((option) =>
+      `**${formatBookTitle(option.title, option.author)}** - ${runnerUpScore} ${scoreLabel}${runnerUpScore === 1 ? "" : "s"}`,
+    ).join("\n")
+    : "No other books were nominated.";
+  const runnerUpFiles = addAnnouncementSection(
+    embed,
+    runnersUp.length > 1 ? "Runners-up (tied)" : "Runner-up",
+    runnerUpText,
+    "book-poll-runners-up.txt",
+  );
+
+  for (const [index, value] of voteRevealPages.entries()) {
+    const announcementEmbed = index === 0
+      ? embed
+      : new EmbedBuilder()
+        .setColor(0x6f8f72)
+        .setTitle("Book Club Poll Votes (continued)")
+        .setTimestamp();
+    const voteFiles = addAnnouncementSection(announcementEmbed, "Votes", value, "book-poll-ballot.txt");
+    const files = index === 0 ? [...runnerUpFiles, ...voteFiles] : voteFiles;
+
+    await channel.send({
+      content: index === 0
+        ? `@everyone The book poll is over. **${formatBookTitle(winner.title, winner.author)}** won and has been added to the club list.`
+        : undefined,
+      embeds: [announcementEmbed],
+      files,
+      allowedMentions: index === 0
+        ? { parse: ["everyone"], users: [winner.nominatedBy] }
+        : { parse: [] },
+    });
+  }
 }
 
 async function announcePollTie(
@@ -139,20 +228,20 @@ async function announcePollTie(
   if (!channel?.isTextBased() || !("send" in channel)) return;
 
   const tiedBookVoteText = buildTiedBookVoteText(poll, tiedOptionIndexes, scoreText);
-  const embed = new EmbedBuilder()
-    .setColor(0xd6a84b)
-    .setTitle("Book Club Poll Tie")
-    .setDescription(truncateAnnouncement(tiedBookVoteText, 4096))
-    .addFields({ name: "Poll type", value: formatPollType(poll), inline: true })
-    .setTimestamp();
+  for (const [index, description] of splitAnnouncement(tiedBookVoteText, 4096).entries()) {
+    const embed = new EmbedBuilder()
+      .setColor(0xd6a84b)
+      .setTitle(index === 0 ? "Book Club Poll Tie" : "Book Club Poll Tie (continued)")
+      .setDescription(description)
+      .addFields({ name: "Poll type", value: formatPollType(poll), inline: true })
+      .setTimestamp();
 
-  await channel.send({
-    content: "@everyone The book poll is over. It ended in a tie, so no book was added.",
-    embeds: [embed],
-    allowedMentions: {
-      parse: ["everyone"],
-    },
-  });
+    await channel.send({
+      content: index === 0 ? "@everyone The book poll is over. It ended in a tie, so no book was added." : undefined,
+      embeds: [embed],
+      allowedMentions: { parse: index === 0 ? ["everyone"] : [] },
+    });
+  }
 }
 
 export async function closeActiveBookPolls(options: CloseActiveBookPollsOptions): Promise<CloseActiveBookPollsResult> {
