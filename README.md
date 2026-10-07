@@ -1,7 +1,7 @@
 # Book-Bot
 Bot for my friends to use to view, store, nominate our books
 
-`/book-list` shows up to 10 books per page. Use Previous and Next to browse the full library, and the sort menu to rearrange it. Changing the sort starts at page 1.
+`/book-list` shows up to 10 books per page, with newest added first by default. Use Previous and Next to browse the full library, and the sort menu to rearrange it. Changing the sort starts at page 1.
 
 Use `/update-book` to change an existing book's title, author, or cover image. Choose the book from the `title` suggestions, then provide `new-title`, `author`, `image-url`, or any combination. Omitted fields keep their current values. Title changes preserve the book's ID, ratings, reviews, and rating timestamps.
 

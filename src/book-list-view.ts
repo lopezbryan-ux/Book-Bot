@@ -132,7 +132,7 @@ function formatBookDetails(book: BookDocument) {
 
 export async function buildBookListMessage(
   guildId: string | null,
-  selectedSort: BookListSort = "added-oldest",
+  selectedSort: BookListSort = "added-newest",
   page = 0,
 ) {
   const { books } = getBookClubCollections();

@@ -95,20 +95,21 @@ async function updateMessage(handler, interaction) {
   return message;
 }
 
-test("/book-list starts with ten books and shows the total library size", async () => {
+test("/book-list starts with the ten newest books and shows the total library size", async () => {
   documents.push({ ...books[0], guildId: "other-server" }, { ...books[0], documentType: "rating" });
   let reply;
   await execute({ guildId, async reply(message) { reply = message; } });
   const { embed, menu, buttons } = validateMessage(reply);
   assert.equal(embed.fields.length, 10);
-  assert.equal(embed.fields[0].name, "📖  Book 01");
-  assert.equal(embed.fields[9].name, "📖  Book 10");
+  assert.equal(embed.fields[0].name, "📖  Book 27");
+  assert.equal(embed.fields[9].name, "📖  Book 18");
   assert.match(embed.footer.text, /Page 1 of 3.*27 books/);
-  assert.equal(menu.options.find((option) => option.default).value, "added-oldest");
+  assert.equal(menu.options.find((option) => option.default).value, "added-newest");
   assert.equal(buttons[0].disabled, true);
   assert.equal(buttons[1].label, "1/3");
   assert.equal(buttons[1].disabled, true);
   assert.equal(buttons[2].disabled, false);
+  assert.equal(buttons[2].custom_id, "book-list-page:added-newest:1");
 });
 
 for (const [sort, reversed] of [
@@ -174,7 +175,7 @@ test("an old page button moves to the last available page after books are remove
   documents = books.slice(0, 11);
   const { embed, buttons } = validateMessage(await updateMessage(handleBookListPage, { customId: secondPage.buttons[2].custom_id }));
   assert.equal(embed.fields.length, 1);
-  assert.equal(embed.fields[0].name, "📖  Book 11");
+  assert.equal(embed.fields[0].name, "📖  Book 01");
   assert.match(embed.footer.text, /Page 2 of 2.*11 books/);
   assert.equal(buttons[2].disabled, true);
 });
