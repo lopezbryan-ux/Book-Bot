@@ -1,7 +1,11 @@
 import {
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonInteraction,
+  ButtonStyle,
   EmbedBuilder,
   escapeMarkdown,
+  MessageFlags,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
   StringSelectMenuOptionBuilder,
@@ -9,7 +13,8 @@ import {
 import { BookDocument, getBookClubCollections } from "./book-club.js";
 
 const BOOK_LIST_SORT_CUSTOM_ID = "book-list-sort";
-const BOOK_LIST_LIMIT = 20;
+const BOOK_LIST_PAGE_PREFIX = "book-list-page";
+const BOOKS_PER_PAGE = 10;
 
 const bookListSorts = {
   "added-oldest": {
@@ -65,7 +70,7 @@ const bookListSorts = {
 export type BookListSort = keyof typeof bookListSorts;
 
 function isBookListSort(value: string): value is BookListSort {
-  return value in bookListSorts;
+  return Object.prototype.hasOwnProperty.call(bookListSorts, value);
 }
 
 function buildSortMenu(selectedSort: BookListSort) {
@@ -90,6 +95,30 @@ export function isBookListSortCustomId(customId: string) {
   return customId === BOOK_LIST_SORT_CUSTOM_ID;
 }
 
+export function isBookListPageCustomId(customId: string) {
+  return customId.startsWith(`${BOOK_LIST_PAGE_PREFIX}:`);
+}
+
+function buildPageButtons(selectedSort: BookListSort, page: number, totalPages: number) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`${BOOK_LIST_PAGE_PREFIX}:${selectedSort}:${page - 1}`)
+      .setLabel("Previous")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page === 0),
+    new ButtonBuilder()
+      .setCustomId(`${BOOK_LIST_PAGE_PREFIX}:${selectedSort}:${page}`)
+      .setLabel(`${page + 1}/${totalPages}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(`${BOOK_LIST_PAGE_PREFIX}:${selectedSort}:${page + 1}`)
+      .setLabel("Next")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page === totalPages - 1),
+  );
+}
+
 function formatBookDetails(book: BookDocument) {
   const author = book.author ? `by **${escapeMarkdown(book.author).slice(0, 180)}**` : "*Author not listed*";
   const selectedAt = book.selectedAt instanceof Date ? book.selectedAt.getTime() : Number.NaN;
@@ -101,13 +130,26 @@ function formatBookDetails(book: BookDocument) {
   return `${author}  ·  Added <t:${Math.floor(selectedAt / 1000)}:d>`;
 }
 
-export async function buildBookListMessage(guildId: string | null, selectedSort: BookListSort = "added-oldest") {
+export async function buildBookListMessage(
+  guildId: string | null,
+  selectedSort: BookListSort = "added-oldest",
+  page = 0,
+) {
   const { books } = getBookClubCollections();
   const sortOption = bookListSorts[selectedSort];
+  const filter = { documentType: "book" as const, guildId };
+  const totalBooks = await books.countDocuments(filter);
+  if (totalBooks === 0) {
+    return null;
+  }
+
+  const totalPages = Math.ceil(totalBooks / BOOKS_PER_PAGE);
+  const safePage = Math.min(Math.max(Number.isSafeInteger(page) ? page : 0, 0), totalPages - 1);
   const selectedBooks = await books
-    .find({ documentType: "book", guildId })
+    .find(filter)
     .sort(sortOption.sort)
-    .limit(BOOK_LIST_LIMIT)
+    .skip(safePage * BOOKS_PER_PAGE)
+    .limit(BOOKS_PER_PAGE)
     .toArray();
 
   if (selectedBooks.length === 0) {
@@ -126,10 +168,32 @@ export async function buildBookListMessage(guildId: string | null, selectedSort:
       })),
     )
     .setFooter({
-      text: `${selectedBooks.length} book${selectedBooks.length === 1 ? "" : "s"} on this shelf  •  ${sortOption.footer}`,
+      text: `Page ${safePage + 1} of ${totalPages}  •  ${totalBooks} book${totalBooks === 1 ? "" : "s"} on this shelf  •  ${sortOption.footer}`,
     });
 
-  return { embeds: [embed], components: [buildSortMenu(selectedSort)] };
+  return {
+    embeds: [embed],
+    components: [
+      buildSortMenu(selectedSort),
+      ...(totalPages > 1 ? [buildPageButtons(selectedSort, safePage, totalPages)] : []),
+    ],
+  };
+}
+
+async function updateBookList(
+  interaction: ButtonInteraction | StringSelectMenuInteraction,
+  selectedSort: BookListSort,
+  page = 0,
+) {
+  await interaction.deferUpdate();
+  const message = await buildBookListMessage(interaction.guildId, selectedSort, page);
+
+  if (!message) {
+    await interaction.editReply({ content: "No books have been added to the club list yet.", embeds: [], components: [] });
+    return;
+  }
+
+  await interaction.editReply(message);
 }
 
 export async function handleBookListSort(interaction: StringSelectMenuInteraction) {
@@ -138,13 +202,24 @@ export async function handleBookListSort(interaction: StringSelectMenuInteractio
     throw new Error("Invalid book list sort option.");
   }
 
-  await interaction.deferUpdate();
-  const message = await buildBookListMessage(interaction.guildId, selectedSort);
+  await updateBookList(interaction, selectedSort);
+}
 
-  if (!message) {
-    await interaction.editReply({ content: "No books have been added to the club list yet.", embeds: [], components: [] });
+export async function handleBookListPage(interaction: ButtonInteraction) {
+  const parts = interaction.customId.split(":");
+  const [prefix, selectedSort, pageText] = parts;
+  const page = Number(pageText);
+  if (
+    parts.length !== 3 ||
+    prefix !== BOOK_LIST_PAGE_PREFIX ||
+    !selectedSort ||
+    !isBookListSort(selectedSort) ||
+    !/^-?\d+$/.test(pageText ?? "") ||
+    !Number.isSafeInteger(page)
+  ) {
+    await interaction.reply({ content: "That book list page button is invalid.", flags: MessageFlags.Ephemeral });
     return;
   }
 
-  await interaction.editReply(message);
+  await updateBookList(interaction, selectedSort, page);
 }
